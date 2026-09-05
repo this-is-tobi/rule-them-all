@@ -71,8 +71,8 @@ With `rta mcp serve --consent`, a call that needs a grant nobody issued is **par
 
 ```bash
 rta agent pending
-rta agent show 3      # what it would do, from the capability's own --dry-run
-rta agent allow 3
+rta agent show 5473aa62      # what it would do, from the capability's own --dry-run
+rta agent allow 5473aa62
 ```
 
 Answering `allow` runs that one call. It does not create a standing grant — if the agent asks again, you are asked again. That is the difference between consent and permission, and rta keeps them separate.

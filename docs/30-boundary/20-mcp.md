@@ -115,9 +115,9 @@ With `--consent`, a call that needs a grant nobody issued is **parked** instead 
 
 ```bash
 rta agent pending
-rta agent show 3        # everything about it, including what it would do
-rta agent allow 3
-rta agent deny 3
+rta agent show 5473aa62        # everything about it, including what it would do
+rta agent allow 5473aa62
+rta agent deny 5473aa62
 ```
 
 `--consent-preview` (on by default) runs the capability's own `--dry-run` and shows the result on the parked request, which changes the question from *"may this agent call `note.rm`"* to *"may it remove **this note**"*.

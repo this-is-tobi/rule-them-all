@@ -202,8 +202,8 @@ A call needing a grant nobody issued parks rather than failing:
 
 ```bash
 rta agent pending
-rta agent show 3       # including what it would do, from its own --dry-run
-rta agent allow 3
+rta agent show 5473aa62       # including what it would do, from its own --dry-run
+rta agent allow 5473aa62
 ```
 
 Answering `allow` runs that one call and creates no standing grant.

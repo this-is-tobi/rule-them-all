@@ -19,7 +19,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -199,68 +198,8 @@ func Plugin() plugin.Plugin {
 				},
 				Run: localOnly(runDeny),
 			},
-			{
-				ID:      "agent.reanchor",
-				Summary: "Restore the mark that says where the record ends, when only the mark is lost",
-				Description: "`rta agent log --detail` reports the record BROKEN for three different " +
-					"reasons, and only one of them is repairable: the mark recording where the record " +
-					"ends is gone or no longer verifies, while every entry on disk still checks out. " +
-					"That is a lost note, not lost evidence, and until now it had no answer — deleting " +
-					"the mark does not help, because absent is exactly the state being reported, so the " +
-					"record stayed alarming forever.\n\nRefuses everything else, and that refusal is the " +
-					"point: an entry whose seal fails means a line was edited, and a record shorter than " +
-					"its mark means entries were removed from the end. Both are the chain doing its job, " +
-					"and neither can be re-anchored away. Never reachable over MCP — an agent that could " +
-					"clear the tamper signal on its own audit trail is the one thing this record exists " +
-					"to prevent.",
-				Safety: plugin.Destructive,
-				Run:    localOnly(runReanchor),
-			},
 		},
 	}
-}
-
-func runReanchor(_ context.Context, req plugin.Request) (view.View, error) {
-	rep, err := agentlog.Verify()
-	if err != nil {
-		return nil, view.Errorf("agent.reanchor.unreadable", "the record could not be read: %v", err)
-	}
-	switch {
-	case rep.Broken == 0:
-		return nil, view.Errorf("agent.reanchor.whole",
-			"the record is whole — there is nothing to re-anchor").
-			WithHint("`rta agent log --detail` shows the record's state")
-	case !rep.Unanchored:
-		// Named rather than repaired, and the message says which of the two it
-		// is: an operator who reads "cannot be repaired" without being told
-		// what was found has no next step, and the next step here is to go and
-		// look at the record rather than at rta.
-		return nil, view.Errorf("agent.reanchor.evidence",
-			"this is not a lost mark — entry %d %s", rep.Broken, rep.Why).
-			WithHint("re-anchoring would erase that finding rather than fix it. The entries " +
-				"themselves are what disagree, so the record is the thing to go and read")
-	}
-	if req.DryRun {
-		return view.Text{Body: fmt.Sprintf(
-			"would re-anchor the record at entry %d, its last entry — every one of the %d entries "+
-				"on disk verifies, and only the mark recording where they stop is missing.",
-			rep.Last, rep.Entries)}, nil
-	}
-	seq, err := agentlog.Reanchor()
-	if errors.Is(err, agentlog.ErrNothingToRepair) {
-		// Reachable only if the record changed between the check above and the
-		// write, which means something appended and wrote its own mark — the
-		// repair happened without this call.
-		return nil, view.Errorf("agent.reanchor.whole",
-			"the record was written to while this ran, and it now carries its own mark").
-			WithHint("`rta agent log --detail` shows the record's state")
-	}
-	if err != nil {
-		return nil, view.Errorf("agent.reanchor.failed", "re-anchoring the record: %v", err)
-	}
-	return view.Text{Body: fmt.Sprintf(
-		"Re-anchored at entry %d. The record reads as whole again, and every entry it "+
-			"carries is one that verified before the mark was written.", seq)}, nil
 }
 
 // localOnly refuses the MCP surface, in one place so that adding a
@@ -447,6 +386,11 @@ func recordPairs(rep agentlog.Report, verr error) []view.Pair {
 		pairs = append(pairs, view.Pair{Key: "not recorded",
 			Value: fmt.Sprintf("%d calls rta could not write down — the entries after them say where",
 				rep.Missed)})
+	}
+	if len(rep.MarkLost) > 0 {
+		pairs = append(pairs, view.Pair{Key: "end mark",
+			Value: fmt.Sprintf("was missing before %s %s — anything removed from the end before then cannot be detected; everything after can",
+				plural(len(rep.MarkLost), "entry", "entries"), joinSeqs(rep.MarkLost))})
 	}
 	if rep.Retired > 0 {
 		pairs = append(pairs, view.Pair{Key: "retired",
@@ -1154,4 +1098,12 @@ func stampFormat(entries []agentlog.Entry) string {
 		}
 	}
 	return timeOnly
+}
+
+func joinSeqs(seqs []int64) string {
+	parts := make([]string, 0, len(seqs))
+	for _, s := range seqs {
+		parts = append(parts, strconv.FormatInt(s, 10))
+	}
+	return strings.Join(parts, ", ")
 }

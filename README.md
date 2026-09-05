@@ -44,7 +44,7 @@ Which is why the security chapters below are not an appendix, and why every one 
 
 ## What is in it
 
-**20 built-in plugins, 124 capabilities** in the default build, and `rta plugin list` is the inventory:
+**20 built-in plugins, 123 capabilities** in the default build, and `rta plugin list` is the inventory:
 
 `sys` · `net` · `http` · `cert` · `fs` · `kv` · `note` · `gen` · `codec` · `time` · `audit` · `grant` · `agent` · `operator` · `lock` · `pkg` · `debug` · `keys` · `git` · `eol`
 

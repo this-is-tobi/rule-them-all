@@ -18,7 +18,7 @@ After that the chapters stand alone, with one exception worth stating because a 
 
 ## What is in it
 
-**20 built-in plugins, 124 capabilities** in the default build, and `rta plugin list` is the inventory:
+**20 built-in plugins, 123 capabilities** in the default build, and `rta plugin list` is the inventory:
 
 `sys` · `net` · `http` · `cert` · `fs` · `kv` · `note` · `gen` · `codec` · `time` · `audit` · `grant` · `agent` · `operator` · `lock` · `pkg` · `debug` · `keys` · `git` · `eol`
 

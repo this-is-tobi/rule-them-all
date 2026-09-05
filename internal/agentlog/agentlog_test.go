@@ -356,3 +356,65 @@ func seqList(es []Entry) []int64 {
 	}
 	return out
 }
+
+// A lost end mark is admitted in the next entry, permanently, rather than
+// healed in silence. Truncating the record and removing the mark used to
+// read as whole after one more call; the admission now says where the
+// end stopped being vouched for.
+func TestALostMarkIsAdmittedInTheNextEntry(t *testing.T) {
+	isolate(t)
+	for i := 0; i < 5; i++ {
+		if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Truncate to three entries and take the mark with it.
+	body, _ := os.ReadFile(Path())
+	lines := strings.SplitAfter(string(body), "\n")
+	if err := os.WriteFile(Path(), []byte(strings.Join(lines[:3], "")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(headPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatal(err)
+	}
+	rep, verr := Verify()
+	if verr != nil {
+		t.Fatal(verr)
+	}
+	if rep.Broken != 0 {
+		t.Fatalf("the healed record must verify: %+v", rep)
+	}
+	if len(rep.MarkLost) != 1 || rep.MarkLost[0] != 4 {
+		t.Fatalf("the admission is missing or misplaced: %v", rep.MarkLost)
+	}
+	got, _ := Read(0)
+	if len(got) != 4 || !got[3].MarkLost {
+		t.Fatalf("entry 4 does not carry the admission: %+v", got)
+	}
+}
+
+// A key is minted for a record that has none, never over one that exists,
+// and a key that is present but empty is named with the next step.
+func TestAKeyIsNeverMintedOverAnExistingRecord(t *testing.T) {
+	isolate(t)
+	if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(seal.Path(keyFile)); err != nil {
+		t.Fatal(err)
+	}
+	err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open})
+	if err == nil || !strings.Contains(err.Error(), "will not mint") {
+		t.Fatalf("a fresh key was minted over a record: %v", err)
+	}
+	if err := os.WriteFile(seal.Path(keyFile), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open})
+	if err == nil || !strings.Contains(err.Error(), seal.Path(keyFile)) {
+		t.Fatalf("an empty key is not named by its path: %v", err)
+	}
+}
