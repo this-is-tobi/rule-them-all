@@ -502,6 +502,11 @@ func runAllow(_ context.Context, req plugin.Request, catalog func() []plugin.Cap
 		return nil, verr
 	}
 	ttl := notes.ttl
+	// The ceiling before the passphrase: a target the team policy forbids
+	// is refused before anybody types anything, not after.
+	if verr := core.CheckCeiling(g.Target, g.Scope, g.Profile); verr != nil {
+		return nil, verr
+	}
 	// The guard, before anything is written: prove the passphrase, sign the
 	// authority. After the Grant is fully built — the signature covers the
 	// struct as issued, and signing a draft that a later field-set would
@@ -756,6 +761,10 @@ func runRenew(_ context.Context, req plugin.Request) (view.View, error) {
 	var renewed []string
 	var stale []string
 	var capped bool
+	teamCeiling, verr := core.Ceiling()
+	if verr != nil {
+		return nil, verr
+	}
 	// Read once, outside the lock, for the staleness note below. A config that
 	// cannot be read costs the note and nothing else.
 	cfg, cfgErr := config.Load()
@@ -784,7 +793,10 @@ func runRenew(_ context.Context, req plugin.Request) (view.View, error) {
 			if !g.Active(now) {
 				continue
 			}
-			if target != "" && g.Target != target {
+			// The same selector as revoke: a plugin name takes every grant
+			// inside it. `renew kv` used to match nothing while `revoke kv`
+			// took them all.
+			if target != "" && g.Target != target && core.Namespace(g.Target) != target {
 				continue
 			}
 			if scope != "" && g.Scope != scope {
@@ -801,10 +813,17 @@ func runRenew(_ context.Context, req plugin.Request) (view.View, error) {
 				window = g.Window()
 			}
 			expires := now.Add(window)
-			// The absolute ceiling, applied here so the message can say it
-			// happened. Active() would enforce it regardless; what it cannot do
-			// is tell somebody why their grant died earlier than they asked.
-			if ceiling := g.Issued.Add(core.MaxTTL); expires.After(ceiling) {
+			// The ceiling, applied here so the message can say it happened.
+			// Active() would enforce it regardless; what it cannot do is
+			// tell somebody why their grant died earlier than they asked.
+			// The team's ceiling counts from first consent exactly as the
+			// absolute one does, and Load drops the grant there: renew used
+			// to print a deadline past it and never say the ceiling bit.
+			limit := core.MaxTTL
+			if teamCeiling.MaxTTL > 0 && teamCeiling.MaxTTL < limit {
+				limit = teamCeiling.MaxTTL
+			}
+			if ceiling := g.Issued.Add(limit); expires.After(ceiling) {
 				expires, capped = ceiling, true
 			}
 			// The deadline, and nothing else. **ProfilePin is deliberately not

@@ -2,6 +2,7 @@ package agentlog
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,5 +254,167 @@ func TestAMissingLedgerIsNotAnError(t *testing.T) {
 	rep, err := Verify()
 	if err != nil || rep.Entries != 0 || rep.Broken != 0 {
 		t.Fatalf("Verify on a fresh machine: %v %+v", err, rep)
+	}
+}
+
+// One oversized row used to end the record: a refusal that echoed a 3 MB
+// argument wrote a 3 MB line, the tail reader found no line end in its
+// window, and every append after it failed. Every string is bounded now,
+// and a row written before that is read past rather than fatal.
+func TestAnOversizedRowIsBoundedAndAnOldOneIsReadPast(t *testing.T) {
+	isolate(t)
+	huge := strings.Repeat("A", 3<<20)
+	if err := Append(Entry{Cap: "fs.hash", Outcome: Failed, Auth: Open, Reason: huge, Args: map[string]any{"path": huge}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatalf("the append after an oversized one failed: %v", err)
+	}
+	got, err := Read(0)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("read = %d entries, %v", len(got), err)
+	}
+	if len(got[0].Reason) > maxField+4 || got[0].Args["…"] == nil {
+		t.Errorf("row was not bounded: reason %d bytes, args %v", len(got[0].Reason), got[0].Args)
+	}
+	rep, verr := Verify()
+	if verr != nil || rep.Broken != 0 {
+		t.Fatalf("a bounded record must verify: %+v %v", rep, verr)
+	}
+
+	// A record with a raw oversized line from before the bound: the next
+	// append and every reader get past it.
+	isolate(t)
+	if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(Path(), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(f, `{"seq":2,"at":"2026-08-28T00:00:00Z","capability":"fs.hash","outcome":"failed","auth":"open","reason":"%s","prev":"x","seal":"y"}`+"\n", strings.Repeat("B", 200<<10))
+	f.Close()
+	if err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatalf("append after a raw oversized line: %v", err)
+	}
+	if got, err := Read(0); err != nil || len(got) != 3 {
+		t.Fatalf("read past the oversized line = %d, %v", len(got), err)
+	}
+	if _, verr := Verify(); verr != nil {
+		t.Fatalf("verify must read past the oversized line: %v", verr)
+	}
+}
+
+func TestReadAfterWalksForwardFromTheCursor(t *testing.T) {
+	isolate(t)
+	for i := 0; i < 12; i++ {
+		if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ReadAfter(2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 || got[0].Seq != 3 || got[4].Seq != 7 {
+		t.Fatalf("ReadAfter(2, 5) = %v, want seq 3..7", seqList(got))
+	}
+	if got, _ := ReadAfter(12, 5); len(got) != 0 {
+		t.Errorf("past the end = %v", seqList(got))
+	}
+	if got, _ := ReadAfter(0, 0); len(got) != 12 {
+		t.Errorf("no limit = %d entries", len(got))
+	}
+}
+
+func TestRecentIsBoundedByTimeNotCount(t *testing.T) {
+	isolate(t)
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 3; i++ {
+		if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open, At: old}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := Recent(time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[0].Seq != 4 {
+		t.Fatalf("Recent = %v, want the four recent ones", seqList(got))
+	}
+}
+
+func seqList(es []Entry) []int64 {
+	out := make([]int64, 0, len(es))
+	for _, e := range es {
+		out = append(out, e.Seq)
+	}
+	return out
+}
+
+// A lost end mark is admitted in the next entry, permanently, rather than
+// healed in silence. Truncating the record and removing the mark used to
+// read as whole after one more call; the admission now says where the
+// end stopped being vouched for.
+func TestALostMarkIsAdmittedInTheNextEntry(t *testing.T) {
+	isolate(t)
+	for i := 0; i < 5; i++ {
+		if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Truncate to three entries and take the mark with it.
+	body, _ := os.ReadFile(Path())
+	lines := strings.SplitAfter(string(body), "\n")
+	if err := os.WriteFile(Path(), []byte(strings.Join(lines[:3], "")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(headPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatal(err)
+	}
+	rep, verr := Verify()
+	if verr != nil {
+		t.Fatal(verr)
+	}
+	if rep.Broken != 0 {
+		t.Fatalf("the healed record must verify: %+v", rep)
+	}
+	if len(rep.MarkLost) != 1 || rep.MarkLost[0] != 4 {
+		t.Fatalf("the admission is missing or misplaced: %v", rep.MarkLost)
+	}
+	got, _ := Read(0)
+	if len(got) != 4 || !got[3].MarkLost {
+		t.Fatalf("entry 4 does not carry the admission: %+v", got)
+	}
+}
+
+// A key is minted for a record that has none, never over one that exists,
+// and a key that is present but empty is named with the next step.
+func TestAKeyIsNeverMintedOverAnExistingRecord(t *testing.T) {
+	isolate(t)
+	if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(seal.Path(keyFile)); err != nil {
+		t.Fatal(err)
+	}
+	err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open})
+	if err == nil || !strings.Contains(err.Error(), "will not mint") {
+		t.Fatalf("a fresh key was minted over a record: %v", err)
+	}
+	if err := os.WriteFile(seal.Path(keyFile), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open})
+	if err == nil || !strings.Contains(err.Error(), seal.Path(keyFile)) {
+		t.Fatalf("an empty key is not named by its path: %v", err)
 	}
 }

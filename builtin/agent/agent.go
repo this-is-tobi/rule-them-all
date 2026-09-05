@@ -19,7 +19,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -199,68 +198,8 @@ func Plugin() plugin.Plugin {
 				},
 				Run: localOnly(runDeny),
 			},
-			{
-				ID:      "agent.reanchor",
-				Summary: "Restore the mark that says where the record ends, when only the mark is lost",
-				Description: "`rta agent log --detail` reports the record BROKEN for three different " +
-					"reasons, and only one of them is repairable: the mark recording where the record " +
-					"ends is gone or no longer verifies, while every entry on disk still checks out. " +
-					"That is a lost note, not lost evidence, and until now it had no answer — deleting " +
-					"the mark does not help, because absent is exactly the state being reported, so the " +
-					"record stayed alarming forever.\n\nRefuses everything else, and that refusal is the " +
-					"point: an entry whose seal fails means a line was edited, and a record shorter than " +
-					"its mark means entries were removed from the end. Both are the chain doing its job, " +
-					"and neither can be re-anchored away. Never reachable over MCP — an agent that could " +
-					"clear the tamper signal on its own audit trail is the one thing this record exists " +
-					"to prevent.",
-				Safety: plugin.Destructive,
-				Run:    localOnly(runReanchor),
-			},
 		},
 	}
-}
-
-func runReanchor(_ context.Context, req plugin.Request) (view.View, error) {
-	rep, err := agentlog.Verify()
-	if err != nil {
-		return nil, view.Errorf("agent.reanchor.unreadable", "the record could not be read: %v", err)
-	}
-	switch {
-	case rep.Broken == 0:
-		return nil, view.Errorf("agent.reanchor.whole",
-			"the record is whole — there is nothing to re-anchor").
-			WithHint("`rta agent log --detail` shows the record's state")
-	case !rep.Unanchored:
-		// Named rather than repaired, and the message says which of the two it
-		// is: an operator who reads "cannot be repaired" without being told
-		// what was found has no next step, and the next step here is to go and
-		// look at the record rather than at rta.
-		return nil, view.Errorf("agent.reanchor.evidence",
-			"this is not a lost mark — entry %d %s", rep.Broken, rep.Why).
-			WithHint("re-anchoring would erase that finding rather than fix it. The entries " +
-				"themselves are what disagree, so the record is the thing to go and read")
-	}
-	if req.DryRun {
-		return view.Text{Body: fmt.Sprintf(
-			"would re-anchor the record at entry %d, its last entry — every one of the %d entries "+
-				"on disk verifies, and only the mark recording where they stop is missing.",
-			rep.Last, rep.Entries)}, nil
-	}
-	seq, err := agentlog.Reanchor()
-	if errors.Is(err, agentlog.ErrNothingToRepair) {
-		// Reachable only if the record changed between the check above and the
-		// write, which means something appended and wrote its own mark — the
-		// repair happened without this call.
-		return nil, view.Errorf("agent.reanchor.whole",
-			"the record was written to while this ran, and it now carries its own mark").
-			WithHint("`rta agent log --detail` shows the record's state")
-	}
-	if err != nil {
-		return nil, view.Errorf("agent.reanchor.failed", "re-anchoring the record: %v", err)
-	}
-	return view.Text{Body: fmt.Sprintf(
-		"Re-anchored at entry %d. The record reads as whole again, and every entry it "+
-			"carries is one that verified before the mark was written.", seq)}, nil
 }
 
 // localOnly refuses the MCP surface, in one place so that adding a
@@ -318,10 +257,16 @@ func openSessions() ([]session.Record, map[string]int) {
 		return nil, nil
 	}
 	calls := map[string]int{}
-	if entries, err := agentlog.Read(maxRows); err == nil {
-		for _, e := range entries {
-			if e.Session != "" {
-				calls[e.Session]++
+	if len(open) > 0 {
+		// Since the oldest open server started: every call of every open
+		// session is inside that window, and nothing older matters here.
+		// A second early: the record stamps entries to the second, and a
+		// server's first call can land inside the second it started in.
+		if entries, err := agentlog.Recent(open[0].Since.Add(-time.Second)); err == nil {
+			for _, e := range entries {
+				if e.Session != "" {
+					calls[e.Session]++
+				}
 			}
 		}
 	}
@@ -360,18 +305,17 @@ func plural(n int, one, many string) string {
 }
 
 func runOverview(_ context.Context, req plugin.Request) (view.View, error) {
-	entries, err := agentlog.Read(maxRows)
+	hour := time.Now().Add(-time.Hour)
+	// Bounded by time, not by a display-sized window: a busy hour has more
+	// than five hundred calls, and the tile said 500.
+	entries, err := agentlog.Recent(hour)
 	if err != nil {
 		return nil, view.Errorf("agent.log.unreadable", "%v", err)
 	}
 	waiting, _ := consent.Pending()
 
-	hour := time.Now().Add(-time.Hour)
 	var recent, refused, approved int
 	for _, e := range entries {
-		if e.At.Before(hour) {
-			continue
-		}
 		recent++
 		if e.Outcome == agentlog.Refused {
 			refused++
@@ -402,10 +346,9 @@ func runOverview(_ context.Context, req plugin.Request) (view.View, error) {
 		{Key: "refused", Value: fmt.Sprintf("%d", refused)},
 		{Key: "you approved live", Value: fmt.Sprintf("%d", approved)},
 	}
-	if len(entries) > 0 {
-		last := entries[len(entries)-1]
+	if last, err := agentlog.Read(1); err == nil && len(last) > 0 {
 		pairs = append(pairs, view.Pair{Key: "last call",
-			Value: fmt.Sprintf("%s %s, %s", last.Cap, last.Outcome, format.Ago(last.At))})
+			Value: fmt.Sprintf("%s %s, %s", last[0].Cap, last[0].Outcome, format.Ago(last[0].At))})
 	} else {
 		pairs = append(pairs, view.Pair{Key: "last call", Value: "nothing recorded yet"})
 	}
@@ -443,6 +386,11 @@ func recordPairs(rep agentlog.Report, verr error) []view.Pair {
 		pairs = append(pairs, view.Pair{Key: "not recorded",
 			Value: fmt.Sprintf("%d calls rta could not write down — the entries after them say where",
 				rep.Missed)})
+	}
+	if len(rep.MarkLost) > 0 {
+		pairs = append(pairs, view.Pair{Key: "end mark",
+			Value: fmt.Sprintf("was missing before %s %s — anything removed from the end before then cannot be detected; everything after can",
+				plural(len(rep.MarkLost), "entry", "entries"), joinSeqs(rep.MarkLost))})
 	}
 	if rep.Retired > 0 {
 		pairs = append(pairs, view.Pair{Key: "retired",
@@ -489,10 +437,21 @@ func runLog(_ context.Context, req plugin.Request) (view.View, error) {
 	if onlyRefused || sess != "" {
 		want = maxRows
 	}
-	entries, err := agentlog.Read(want)
+	var entries []agentlog.Entry
+	var err error
+	if after > 0 {
+		// A cursor reads forward: the rows just past it, not the newest
+		// rows that happen to be past it. The difference is the whole
+		// shipping recipe — an archive appended from the newest end skips
+		// whatever a burst wrote between two runs.
+		entries, err = agentlog.ReadAfter(after, want)
+	} else {
+		entries, err = agentlog.Read(want)
+	}
 	if err != nil {
 		return nil, view.Errorf("agent.log.unreadable", "%v", err)
 	}
+	filtered := onlyRefused || sess != "" || after > 0 || !since.IsZero()
 	// Both columns appear only once a row can fill them, which for a record
 	// written before agents were named — or before rta could serve over
 	// HTTP at all — is never, and a column of em dashes on the screen an
@@ -592,7 +551,14 @@ func runLog(_ context.Context, req plugin.Request) (view.View, error) {
 	if sessioned {
 		cols = slices.Insert(cols, whoColumns(named, namedCred), view.Column{Name: "session"})
 	}
-	table := view.Table{Columns: cols, Rows: rows, Total: len(entries)}
+	// Total is what the rows were chosen from; under a filter that is the
+	// rows themselves — `0 of 500 rows` under --refused read as five
+	// hundred refusals.
+	total := len(entries)
+	if filtered {
+		total = len(shown)
+	}
+	table := view.Table{Columns: cols, Rows: rows, Total: total}
 	if !req.Bool("detail") {
 		return table, nil
 	}
@@ -798,11 +764,12 @@ func notPreviewed(r consent.Request) string {
 // answeredBy names the surface that answered, for the decision file and the
 // ledger. It was the literal "cli" once, which the TUI inherited by
 // dispatching this same capability — a label, not a lie, but a wrong one.
+// answeredBy is measured, not asserted: the same origin a grant records,
+// so a one-shot answer typed at a terminal reads as such and one issued by
+// a process with no terminal — an agent with a shell answering its own
+// question — reads as "command", the way a self-issued grant does.
 func answeredBy(req plugin.Request) string {
-	if req.Surface() == plugin.SurfaceTUI {
-		return "tui"
-	}
-	return "cli"
+	return grant.Origin(req.Surface(), term.IsTerminal(int(stdio.Real().Fd())))
 }
 
 func runAllow(_ context.Context, req plugin.Request) (view.View, error) {
@@ -1131,4 +1098,12 @@ func stampFormat(entries []agentlog.Entry) string {
 		}
 	}
 	return timeOnly
+}
+
+func joinSeqs(seqs []int64) string {
+	parts := make([]string, 0, len(seqs))
+	for _, s := range seqs {
+		parts = append(parts, strconv.FormatInt(s, 10))
+	}
+	return strings.Join(parts, ", ")
 }

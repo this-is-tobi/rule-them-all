@@ -81,13 +81,42 @@ func NewServer(reg *registry.Registry, version string, opts Options) *sdk.Server
 		},
 	})
 
+	known := map[string]bool{}
 	for _, c := range reg.Capabilities() {
 		if !opts.exposed(c) || !opts.remoteExposed(c) {
 			continue
 		}
 		server.AddTool(toolDef(c, opts), handler(c, opts, reg))
+		known[toolcall.Name(c.ID)] = true
 	}
+	server.AddReceivingMiddleware(recordUnknownTools(known, opts))
 	return server
+}
+
+// recordUnknownTools writes a row for a tools/call naming a tool the
+// catalogue does not have. The SDK answers those itself, before any handler
+// runs, and so before the record was written: an agent reaching for
+// grant_allow or kv_rm on a server that did not expose them left no trace,
+// and those are exactly the calls an operator grepping outcome=refused is
+// looking for. The name is bounded and cleaned like a client's own name,
+// because it is the caller's to choose.
+func recordUnknownTools(known map[string]bool, opts Options) sdk.Middleware {
+	return func(next sdk.MethodHandler) sdk.MethodHandler {
+		return func(ctx context.Context, method string, req sdk.Request) (sdk.Result, error) {
+			if method == "tools/call" {
+				if r, ok := req.(*sdk.CallToolRequest); ok && r.Params != nil && !known[r.Params.Name] {
+					name := cut(textclean.Terminal(r.Params.Name), maxClientName)
+					rec := agentlog.Entry{
+						Tool: name, Outcome: agentlog.Refused, Auth: agentlog.Blocked,
+						Agent: opts.Agent, Client: clientName(r), Credential: credentialName(ctx),
+						Session: opts.Session, Code: "core.mcp.unknown", Reason: "no such tool on this server",
+					}
+					record(rec)
+				}
+			}
+			return next(ctx, method, req)
+		}
+	}
 }
 
 // reg is passed rather than read off Options because it is what the gate needs
@@ -156,7 +185,10 @@ func call(ctx context.Context, c plugin.Capability, opts Options, reg *registry.
 		values := map[string]any{}
 		if raw := req.Params.Arguments; len(raw) > 0 {
 			if err := json.Unmarshal(raw, &values); err != nil {
-				return errResult(view.Errorf("core.mcp.badargs", "invalid arguments: %v", err)), nil
+				verr := view.Errorf("core.mcp.badargs", "arguments must be a JSON object").
+					WithHint(err.Error())
+				refusedBy(rec, verr)
+				return errResult(verr), nil
 			}
 			// `"arguments": null` is legal JSON and legal MCP — the field is
 			// optional and clients do send it explicitly — and unmarshalling
@@ -334,12 +366,14 @@ func call(ctx context.Context, c plugin.Capability, opts Options, reg *registry.
 			// person, and proceed on their word.
 			// Everything about the refusal is preserved for the case where
 			// the answer never comes.
-			allowed, asked := askConsent(ctx, c, opts, values, profileName, verr, rec)
+			allowed, decided := askConsent(ctx, c, opts, values, profileName, verr, rec)
 			if !allowed {
-				if !asked {
+				if decided == nil {
+					// Never asked: the refusal is the gate's own.
 					refusedBy(rec, verr)
+					return errResult(verr), nil
 				}
-				return errResult(verr), nil
+				return errResult(decided), nil
 			}
 			// The lock check at the top ran before this call parked, and a
 			// call can wait in the queue for minutes — long enough for the
@@ -386,7 +420,7 @@ func call(ctx context.Context, c plugin.Capability, opts Options, reg *registry.
 				// name — is both refused by the gate above, in the gate's own
 				// words. TestAnUnknownProfileAndAnUngrantedOneLookTheSame pins
 				// exactly that.
-				return errResult(ungranted(c, profileName)), nil
+				return errResult(ungranted(c, profileName, opts.Agent)), nil
 			}
 			// After the gate, never before: a secret must not be fetched, and a
 			// port-forward must not be opened into the operator's cluster, for
@@ -448,7 +482,17 @@ func call(ctx context.Context, c plugin.Capability, opts Options, reg *registry.
 			WithConfinement(opts.Paths.Check))
 		rec.Millis = time.Since(started).Milliseconds()
 		if err != nil {
-			release()
+			// No refund: the handler ran. A use used to come back on any
+			// error, which made --max-uses and --rate mean nothing for the
+			// capabilities they exist for — net.probe, net.port, http.*,
+			// audit.web carry NeedsGrant because the failure *is* the
+			// information ("connection refused" is a port map), and a
+			// runaway loop is by definition one that is failing. What is
+			// refunded is what never reached the handler: a profile that
+			// would not resolve, a forward that would not open, a lock —
+			// those releases sit above. A flaky capability burning a
+			// one-time grant costs the operator a re-issue, which is the
+			// honest outcome.
 			ve := view.AsError(err, c.ID+".failed")
 			// A handler's own policy gate — localOnly, humanOnly, a
 			// credential-minting verb refusing agents — says so on the error
@@ -550,11 +594,14 @@ func takeProfile(c plugin.Capability, values map[string]any, opts Options) (stri
 // echoed so a person reading the transcript can see a typo in one line, and
 // the command they would have to run is spelled out, because the agent cannot
 // issue a grant itself and the whole exchange terminates at a human anyway.
-func ungranted(c plugin.Capability, name string) *view.Error {
+func ungranted(c plugin.Capability, name, agent string) *view.Error {
+	cmd := "rta grant allow " + plugin.Namespace(c.ID) + " --profile " + name
+	if agent != "" {
+		cmd += " --agent " + agent
+	}
 	return view.Errorf("core.grant.required",
 		"agents may not use %s on profile %q without a person's consent", c.ID, name).
-		WithHint("ask the operator to run: rta grant allow " + plugin.Namespace(c.ID) +
-			" --profile " + name + " --ttl 15m")
+		WithHint("ask the operator to run: " + cmd + " --ttl 15m")
 }
 
 // ValidateArgs checks every argument the caller actually supplied

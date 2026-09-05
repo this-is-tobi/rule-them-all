@@ -2,6 +2,7 @@ package grant
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -243,4 +244,62 @@ profiles:
 
 func writeConfig(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o600)
+}
+
+// The same selector as revoke: a plugin name takes every grant inside it.
+// `renew kv` used to match nothing while `revoke kv` took them all.
+func TestRenewOfAPluginTakesEveryGrantInsideIt(t *testing.T) {
+	t.Setenv("RTA_DATA_DIR", t.TempDir())
+	now := time.Now()
+	if verr := core.Save([]core.Grant{
+		{Target: "kv.get", Scope: "a", Issued: now.Add(-time.Minute), Expires: now.Add(time.Minute), TTL: "2m"},
+		{Target: "kv.rm", Scope: "b", Issued: now.Add(-time.Minute), Expires: now.Add(time.Minute), TTL: "2m"},
+		{Target: "note.rm", Scope: "c", Issued: now.Add(-time.Minute), Expires: now.Add(time.Minute), TTL: "2m"},
+	}); verr != nil {
+		t.Fatal(verr)
+	}
+	if _, err := renew(t, map[string]any{"target": "kv", "ttl": "30m"}); err != nil {
+		t.Fatal(err)
+	}
+	got, verr := core.Load()
+	if verr != nil {
+		t.Fatal(verr)
+	}
+	for _, g := range got {
+		extended := g.Expires.After(now.Add(10 * time.Minute))
+		if strings.HasPrefix(g.Target, "kv.") && !extended {
+			t.Errorf("%s was not renewed by `renew kv`", g.Target)
+		}
+		if g.Target == "note.rm" && extended {
+			t.Errorf("note.rm was renewed by `renew kv`")
+		}
+	}
+}
+
+// Renew caps where the gate caps. A team ceiling bounds a grant from first
+// consent and Load drops it there; renew used to print a deadline past it
+// and never say the ceiling bit.
+func TestRenewIsCappedByTheTeamCeilingAndSaysSo(t *testing.T) {
+	setup(t)
+	withPolicy(t, "maxTTL: 20m\n")
+	now := time.Now()
+	if verr := core.Save([]core.Grant{{
+		Target: "kv.get", Scope: "db", Issued: now.Add(-10 * time.Minute), Expires: now.Add(5 * time.Minute), TTL: "15m",
+	}}); verr != nil {
+		t.Fatal(verr)
+	}
+	v, err := renew(t, map[string]any{"ttl": "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, verr := core.Load()
+	if verr != nil || len(got) != 1 {
+		t.Fatalf("load = %v %v", got, verr)
+	}
+	if limit := now.Add(10 * time.Minute); got[0].Expires.After(limit.Add(2 * time.Second)) {
+		t.Errorf("expires = %v, want at most the team ceiling from first consent (%v)", got[0].Expires, limit)
+	}
+	if body := fmt.Sprint(v); !strings.Contains(body, "capped") && !strings.Contains(body, "ceiling") {
+		t.Errorf("renew did not say the ceiling bit: %s", body)
+	}
 }

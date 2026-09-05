@@ -960,9 +960,11 @@ func TestAOneTimeGrantAuthorizesExactlyOneConcurrentCall(t *testing.T) {
 	}
 }
 
-// A call that passes the grant check but then fails inside Run must not
-// spend a one-time grant that revealed or did nothing — the use is refunded.
-func TestOneTimeGrantSurvivesAFailedCall(t *testing.T) {
+// A call that passes the grant check and then fails inside Run has spent
+// its use. It used to be refunded, which made --max-uses and --rate mean
+// nothing for the capabilities that carry NeedsGrant because their failure
+// is the information: a port map is a list of "connection refused".
+func TestOneTimeGrantIsSpentByAFailedCall(t *testing.T) {
 	s := connect(t, Options{AllowWrite: []string{"demo"}})
 	grants, verr := grant.Load()
 	if verr != nil {
@@ -980,18 +982,15 @@ func TestOneTimeGrantSurvivesAFailedCall(t *testing.T) {
 	if verr != nil {
 		t.Fatal(verr)
 	}
-	if len(grants) != 1 || grants[0].Uses != 0 {
-		t.Fatalf("a failed call spent the grant: %+v", grants)
+	// Load hides a grant with no use left, so the one-time grant is gone.
+	if len(grants) != 0 {
+		t.Fatalf("a failed call did not spend the grant: %+v", grants)
 	}
-	// And the grant is still good: a second attempt fails for the same
-	// declared reason, not because the grant was already spent.
+	// And the second attempt is refused at the gate, not run again.
 	res := callTool(t, s, "demo_item_gatedfail", nil)
 	text := res.Content[0].(*sdk.TextContent).Text
-	if strings.Contains(text, "core.grant.required") {
-		t.Fatal("the surviving grant was not honored on a second attempt")
-	}
-	if !strings.Contains(text, "demo.broken") {
-		t.Fatalf("expected the capability's own failure, got: %s", text)
+	if !strings.Contains(text, "core.grant.required") {
+		t.Fatalf("a spent one-time grant was honored again: %s", text)
 	}
 }
 

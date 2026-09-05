@@ -120,16 +120,6 @@
     }
   },
   {
-    "name": "agent_reanchor",
-    "description": "── the text below is written by the plugin, not by rta ──\nRestore the mark that says where the record ends, when only the mark is lost\n\n`rta agent log --detail` reports the record BROKEN for three different reasons, and only one of them is repairable: the mark recording where the record ends is gone or no longer verifies, while every entry on disk still checks out. That is a lost note, not lost evidence, and until now it had no answer — deleting the mark does not help, because absent is exactly the state being reported, so the record stayed alarming forever.\n\nRefuses everything else, and that refusal is the point: an entry whose seal fails means a line was edited, and a record shorter than its mark means entries were removed from the end. Both are the chain doing its job, and neither can be re-anchored away. Never reachable over MCP — an agent that could clear the tamper signal on its own audit trail is the one thing this record exists to prevent.\n── end of plugin-written text ──\n\nSafety: destructive. Returns a JSON view envelope discriminated by \"type\".\n\nRequires a grant a person issued for this capability. You cannot issue one yourself — ask the operator to run `rta grant allow agent.reanchor`.",
-    "destructive_hint": true,
-    "input_schema": {
-      "additionalProperties": false,
-      "properties": {},
-      "type": "object"
-    }
-  },
-  {
     "name": "agent_show",
     "description": "── the text below is written by the plugin, not by rta ──\nEverything about one parked call, including what it would do\n\nThe request in full: which capability, which record, against which connection, every argument, and — for a destructive call rta could preview — what running it would actually do, taken from the capability's own --dry-run. That last part is the difference between approving an intention and approving an outcome. Answer with `rta agent allow \u003cid\u003e` or `rta agent deny \u003cid\u003e`.\n── end of plugin-written text ──\n\nSafety: read. Returns a JSON view envelope discriminated by \"type\".",
     "read_only_hint": true,

@@ -47,13 +47,24 @@ func runGuardOn(_ context.Context, req plugin.Request) (view.View, error) {
 	// steps, because the rows being blessed are exactly the rows whose
 	// authorship the guard exists to pin. Grants are a day at most; what
 	// this costs is re-issued in minutes, with the passphrase.
+	// Both under the one grant lock: cleared and enabled used to be two
+	// writes under two locks, and a `grant allow` in between passed the
+	// guard check (still off), persisted an unsigned row, and the next
+	// read refused the whole file as forged — a fail-closed alarm raised
+	// by the recovery. Enabled inside the mutation, the window is gone;
+	// a crash between the two writes leaves the guard on over an empty
+	// file, which is the safe side.
+	var enableErr *view.Error
 	if verr := core.Mutate(func([]core.Grant) ([]core.Grant, bool) {
+		if _, enableErr = guard.Enable(pass); enableErr != nil {
+			return nil, false
+		}
 		return nil, true
 	}); verr != nil {
 		return nil, verr
 	}
-	if _, verr := guard.Enable(pass); verr != nil {
-		return nil, verr
+	if enableErr != nil {
+		return nil, enableErr
 	}
 	return view.KeyValue{Pairs: []view.Pair{
 		{Key: "guard", Value: "on — issuing or renewing a grant now asks for the passphrase"},
@@ -233,13 +244,22 @@ func runGuardStatus(_ context.Context, req plugin.Request) (view.View, error) {
 	if req.Surface() == plugin.SurfaceMCP {
 		return nil, view.Refusef("grant.human", "the guard's status is for the person at the terminal")
 	}
+	held, verr := core.Load()
+	// The one state worth seeing first: the guard's own file is gone and
+	// signed grants remain. Every issuing and listing path refuses it as
+	// orphaned; this screen used to say "off" and offer to enable it.
+	if verr != nil && verr.Code == "core.grant.guard.orphaned" {
+		return view.KeyValue{Pairs: []view.Pair{
+			{Key: "guard", Value: "ORPHANED — grants.json holds guard-signed grants and " + guard.Path() + " is gone; nothing is honoured"},
+			{Key: "fix", Value: "rm " + core.Path() + ", then rta grant guard on"},
+		}}, nil
+	}
 	if !guard.Enabled() {
 		return view.KeyValue{Pairs: []view.Pair{
 			{Key: "guard", Value: "off — any process running as you can issue a grant"},
 			{Key: "enable", Value: "rta grant guard on"},
 		}}, nil
 	}
-	held, verr := core.Load()
 	if verr != nil {
 		return nil, verr
 	}

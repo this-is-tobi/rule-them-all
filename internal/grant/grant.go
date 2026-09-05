@@ -1176,7 +1176,7 @@ func checkAgainst(c plugin.Capability, values map[string]any, grants []Grant, by
 	// The subject is the namespace rather than the capability when a profile is
 	// in play: an operator granting access to a connection almost never means
 	// "and only the status call".
-	return refuseMissing(c, missing, by.Profile)
+	return refuseMissing(c, missing, by.Profile, by.Agent)
 }
 
 // samePin compares two connection fingerprints.
@@ -1379,7 +1379,7 @@ func (g Grant) Stale(pin string) bool {
 }
 
 // refuseMissing is the sentence a call gets when nothing authorizes it.
-func refuseMissing(c plugin.Capability, missing []string, profile string) *view.Error {
+func refuseMissing(c plugin.Capability, missing []string, profile, agent string) *view.Error {
 	if len(missing) == 0 {
 		missing = []string{""}
 	}
@@ -1404,6 +1404,12 @@ func refuseMissing(c plugin.Capability, missing []string, profile string) *view.
 	what := strings.TrimSpace(c.ID + " " + scope)
 	if profile != "" {
 		what = strings.TrimSpace(Namespace(c.ID)+" "+scope) + " --profile " + profile
+	}
+	// And the agent, for the same reason as the profile: covers() matches
+	// it exactly, so on a server started `--as claude` the command without
+	// `--agent claude` issues a row that authorizes nothing.
+	if agent != "" {
+		what += " --agent " + shellQuoteIfNeeded(agent)
 	}
 	return view.Errorf("core.grant.required", "no active grant for %s", describe(c.ID, missing)).
 		WithHint("a person has to allow this first: rta grant allow " + what + " --ttl 15m")

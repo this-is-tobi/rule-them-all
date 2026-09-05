@@ -91,6 +91,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/this-is-tobi/rta/internal/atomicfile"
 	"github.com/this-is-tobi/rta/internal/filelock"
@@ -106,6 +107,10 @@ const (
 	// maxLine bounds one entry, so a capability with enormous arguments
 	// cannot write a line nothing will read back.
 	maxLine = 16 << 10
+	// maxField bounds one string field of an entry that is already over
+	// maxLine — enough for any message a person reads, and ten of them
+	// still fit the line.
+	maxField = 1 << 10
 	// tailWindow is how much of a file's end is read to find its last
 	// entry. Entries are a few hundred bytes; this is generous.
 	tailWindow = 64 << 10
@@ -278,6 +283,14 @@ type Entry struct {
 	// write down. It is inside the seal like everything else, so a record
 	// admitting a gap is a record that admits it verifiably.
 	Missed int64 `json:"missed,omitempty"`
+	// MarkLost says the mark recording where the record ends was missing or
+	// did not verify when this entry was written. The next entry heals the
+	// mark — a record must go on being written — and this is the sealed
+	// admission that it did, permanent in the chain, so a truncation that
+	// took the mark with it is not laundered by the next call. Verify
+	// reports it as information: anything removed from the end before
+	// this entry cannot be detected, everything after it can.
+	MarkLost bool `json:"markLost,omitempty"`
 	// Prev is the previous entry's MAC, and Seal this entry's. Together they
 	// are the chain — across files as well as within one.
 	Prev string `json:"prev"`
@@ -659,9 +672,20 @@ func Append(e Entry) (err error) {
 	appendMu.Lock()
 	defer appendMu.Unlock()
 
+	// The key is minted for a record that has none, never over one that
+	// exists: a fresh key beside six hundred entries made every one of
+	// them read as edited, and named entry 1 as the culprit. And a key
+	// that is present but too short is named by its path with the next
+	// step, because the server's stderr is the only place this is seen.
+	keyPath := seal.Path(keyFile)
+	if _, statErr := os.Stat(keyPath); os.IsNotExist(statErr) {
+		if info, err := os.Stat(Path()); err == nil && info.Size() > 0 {
+			return fmt.Errorf("%s is missing beside a record that is not empty; rta will not mint a new key over an existing record — restore it, or move agent-log*.jsonl aside to start a new one", keyPath)
+		}
+	}
 	key, err := seal.Key(keyFile, true)
 	if err != nil {
-		return fmt.Errorf("agent log key: %w", err)
+		return fmt.Errorf("agent log key %s: %w — restore it, or move the record aside to start a new one", keyPath, err)
 	}
 	if err := os.MkdirAll(paths.Data(), 0o755); err != nil {
 		return err
@@ -701,6 +725,9 @@ func Append(e Entry) (err error) {
 	}
 	e.Seq = last.Seq + 1
 	e.Prev = last.Seal
+	if _, ok := readHead(key); !ok && last.Seq > 0 {
+		e.MarkLost = true
+	}
 	if e.At.IsZero() {
 		e.At = time.Now()
 	}
@@ -715,8 +742,24 @@ func Append(e Entry) (err error) {
 	}
 	if len(body) > maxLine {
 		// Rather than drop the entry: the call happened, and a truncated
-		// record of it beats none. Args are the only unbounded part.
+		// record of it beats none. Args are the unbounded part that is
+		// expected; every string field is bounded after them, because one
+		// was not, once. A refusal that echoed a 3 MB argument in its
+		// message became a 3 MB row, the tail reader could not find a line
+		// end inside its window, and every append on the machine failed
+		// from then on — silently, to a stderr the client swallows. The
+		// row is now bounded whatever a handler puts in it, and lastEntryIn
+		// widens its window besides, so an old oversized row is read past
+		// rather than fatal.
 		e.Args = map[string]any{"…": fmt.Sprintf("%d bytes of arguments, omitted", len(body))}
+		e.Reason = clip(e.Reason, maxField)
+		e.Code = clip(e.Code, maxField)
+		e.Client = clip(e.Client, maxField)
+		e.Credential = clip(e.Credential, maxField)
+		e.Agent = clip(e.Agent, maxField)
+		e.Profile = clip(e.Profile, maxField)
+		e.Tool = clip(e.Tool, maxField)
+		e.Cap = clip(e.Cap, maxField)
 		if body, err = json.Marshal(e); err != nil {
 			return err
 		}
@@ -957,26 +1000,31 @@ func lastEntryIn(path string) (Entry, error) {
 	if size == 0 {
 		return Entry{}, nil
 	}
-	start := size - tailWindow
-	if start < 0 {
-		start = 0
-	}
-	buf := make([]byte, size-start)
-	if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
-		return Entry{}, err
-	}
-	lines := bytes.Split(bytes.TrimRight(buf, "\n"), []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
-		var e Entry
-		if json.Unmarshal(lines[i], &e) == nil && e.Seq > 0 {
-			return e, nil
+	// The window grows until a line parses or the whole file has been
+	// read: a row larger than the window — written before rows were
+	// bounded — must be read past, not reported as the end of the record.
+	for chunk := int64(tailWindow); ; chunk *= 4 {
+		start := size - chunk
+		if start < 0 {
+			start = 0
+		}
+		buf := make([]byte, size-start)
+		if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
+			return Entry{}, err
+		}
+		lines := bytes.Split(bytes.TrimRight(buf, "\n"), []byte("\n"))
+		for i := len(lines) - 1; i >= 0; i-- {
+			var e Entry
+			if json.Unmarshal(lines[i], &e) == nil && e.Seq > 0 {
+				return e, nil
+			}
+		}
+		if start == 0 {
+			break
 		}
 	}
-	// A file whose tail holds no parseable entry: appending with a zero
+	// A file that holds no parseable entry at all: appending with a zero
 	// predecessor would silently start a second chain, so say so instead.
-	if start > 0 {
-		return Entry{}, fmt.Errorf("%s has no readable entry in its last %d bytes", path, tailWindow)
-	}
 	return Entry{}, fmt.Errorf("%s holds no readable entry", path)
 }
 
@@ -1082,8 +1130,7 @@ func entriesIn(path string) ([]Entry, error) {
 	}
 	defer f.Close()
 	var out []Entry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), maxLine*2)
+	sc := newLineReader(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
@@ -1146,6 +1193,11 @@ type Report struct {
 	// job, and a repair command that could not tell them apart would be a
 	// tool for erasing the thing the record exists to show.
 	Unanchored bool
+	// MarkLost lists the entries written while the end mark was missing
+	// or unverifiable (Entry.MarkLost). The mark was healed by each of
+	// them; what is permanent is the admission that, before each, the end
+	// of the record was not vouched for.
+	MarkLost []int64
 }
 
 // Verify walks the chain from the beginning of what is still on disk.
@@ -1244,8 +1296,7 @@ func Verify() (Report, error) {
 		if err != nil {
 			return rep, err
 		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 0, 64<<10), maxLine*2)
+		sc := newLineReader(f)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
 			if line == "" {
@@ -1257,6 +1308,9 @@ func Verify() (Report, error) {
 			}
 			rep.Entries++
 			rep.Missed += e.Missed
+			if e.MarkLost {
+				rep.MarkLost = append(rep.MarkLost, e.Seq)
+			}
 			if !started {
 				started = true
 				// Where the surviving record begins. Entry 1 needs no
@@ -1335,72 +1389,6 @@ func Verify() (Report, error) {
 	return rep, nil
 }
 
-// ErrNothingToRepair is returned when Reanchor is asked to fix a record whose
-// fault is not a lost mark — either there is nothing wrong, or what is wrong
-// is evidence rather than bookkeeping. See Report.Unanchored.
-var ErrNothingToRepair = errors.New("the record's fault is not a missing mark")
-
-// Reanchor writes a fresh high-water mark at the record's current tip, for
-// the one case where the entries are intact and only the mark is gone.
-//
-// **The refusal is the feature.** A record that has lost its mark reports
-// BROKEN forever with no way back, because deleting the mark does not help
-// either — absent is exactly the state being reported. That leaves an
-// operator with a permanently alarming record and no supported answer, which
-// is how people learn to ignore the one line that would matter on the day it
-// meant something. So there is a repair, and it is deliberately incapable of
-// touching anything else: Report.Unanchored is set only when every entry on
-// disk verified, so a failed seal or a record shorter than its mark reaches
-// ErrNothingToRepair and stays visible.
-//
-// Verify runs first and unlocked, then the write takes the lock and reads the
-// tip again rather than trusting the one Verify saw. An Append landing in
-// between is not a race to lose: it writes its own correct mark, and reading
-// the tip fresh under the lock means this either writes the same answer or a
-// newer one, never an older one.
-func Reanchor() (int64, error) {
-	rep, err := Verify()
-	if err != nil {
-		return 0, err
-	}
-	if !rep.Unanchored {
-		return 0, ErrNothingToRepair
-	}
-
-	appendMu.Lock()
-	defer appendMu.Unlock()
-	release, err := filelock.Acquire(Path()+".lock", lockStale, lockRetry, lockTimeout)
-	if err != nil {
-		return 0, fmt.Errorf("agent log is busy: %w", err)
-	}
-	defer release()
-
-	key, err := seal.Key(keyFile, false)
-	if err != nil {
-		return 0, err
-	}
-	// settle() rather than the raw bound, because the mark being unreadable is
-	// precisely why bounds() has nothing to report: the segment high-water
-	// lives in the mark this call is about to rewrite, so the directory is the
-	// only thing left that knows how far the record has rolled. Writing a mark
-	// that claimed segment zero would disown rta's own rolled segments.
-	b, err := bounds().settle()
-	if err != nil {
-		return 0, err
-	}
-	last, err := lastEntry(b)
-	if err != nil {
-		return 0, err
-	}
-	if last.Seq == 0 {
-		return 0, ErrNothingToRepair
-	}
-	if err := writeHead(key, last, b.limit); err != nil {
-		return 0, err
-	}
-	return last.Seq, nil
-}
-
 // plural keeps the two truncation messages readable without pulling a
 // dependency in for one sentence.
 func plural(n int64, one, many string) string {
@@ -1408,4 +1396,114 @@ func plural(n int64, one, many string) string {
 		return fmt.Sprintf("%d %s", n, one)
 	}
 	return fmt.Sprintf("%d %s", n, many)
+}
+
+// lineReader walks a file line by line with no ceiling on a line's length.
+// bufio.Scanner stops at its buffer with "token too long", and a record
+// holding one oversized row — written before rows were bounded — would
+// then be unreadable from that row on, in every command that reads it.
+type lineReader struct {
+	r    *bufio.Reader
+	line string
+	err  error
+}
+
+func newLineReader(f *os.File) *lineReader { return &lineReader{r: bufio.NewReaderSize(f, 64<<10)} }
+
+func (l *lineReader) Scan() bool {
+	if l.err != nil {
+		return false
+	}
+	line, err := l.r.ReadString('\n')
+	if err != nil {
+		if !errors.Is(err, io.EOF) {
+			l.err = err
+		}
+		if line == "" {
+			return false
+		}
+	}
+	l.line = line
+	return true
+}
+
+func (l *lineReader) Text() string { return l.line }
+func (l *lineReader) Err() error   { return l.err }
+
+// clip cuts s to at most n bytes on a rune boundary, marking the cut: a
+// byte-slice through a multi-byte character would put invalid UTF-8 into a
+// sealed file, where it stays forever.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for len(s) > n {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s + "…"
+}
+
+// ReadAfter is the record from just past seq onwards, oldest first, at most
+// limit entries. It walks the segments forward and skips whole files whose
+// last entry is at or before the cursor, so shipping from a cursor costs
+// what is new and not the whole record.
+//
+// This is the read the shipping recipe needs and Read is not: Read keeps
+// the newest entries, so `--after 0 --limit 500` on a 600-entry record
+// answered 101–600 and the archive never saw the first hundred.
+func ReadAfter(seq int64, limit int) ([]Entry, error) {
+	files, err := Segments()
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	for _, p := range files {
+		last, err := lastEntryIn(p)
+		if err != nil || last.Seq <= seq {
+			continue
+		}
+		es, err := entriesIn(p)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range es {
+			if e.Seq <= seq {
+				continue
+			}
+			out = append(out, e)
+			if limit > 0 && len(out) >= limit {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
+}
+
+// Recent is every entry written at or after since, oldest first, bounded by
+// time rather than by count: a tile that says "calls in the last hour" must
+// not stop counting at the last five hundred rows.
+func Recent(since time.Time) ([]Entry, error) {
+	files, err := Segments()
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	for i := len(files) - 1; i >= 0; i-- {
+		es, err := entriesIn(files[i])
+		if err != nil {
+			return nil, err
+		}
+		var keep []Entry
+		for _, e := range es {
+			if !e.At.Before(since) {
+				keep = append(keep, e)
+			}
+		}
+		out = append(keep, out...)
+		if len(es) > 0 && es[0].At.Before(since) {
+			break
+		}
+	}
+	return out, nil
 }

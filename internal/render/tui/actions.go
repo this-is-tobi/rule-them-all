@@ -120,11 +120,12 @@ var capActionSpecs = map[string][]struct {
 	},
 	// A stale grant is something you notice on the dashboard, so taking it
 	// back has to be possible from there and not only from a shell. `n`
-	// re-issues the grant under the cursor, which is what "it expired while I
-	// was still using it" actually needs.
+	// renews the grant under the cursor — renew, not a fresh allow: the
+	// re-issue path is the one `grant renew --help` warns turns a one-time
+	// grant into an unlimited one.
 	"grant.list": {
 		{"a", "allow", "grant.allow", srcNone, false},
-		{"n", "renew", "grant.allow", srcRow, false},
+		{"n", "renew", "grant.renew", srcRow, false},
 		{"x", "revoke", "grant.revoke", srcRow, false},
 	},
 	// The consent queue, answerable from the screen the operator is already

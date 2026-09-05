@@ -37,7 +37,26 @@ func refusedBy(e *agentlog.Entry, verr *view.Error) {
 	if e == nil || verr == nil {
 		return
 	}
-	e.Outcome, e.Code, e.Reason = agentlog.Refused, verr.Code, verr.Message
+	e.Outcome, e.Code, e.Reason = agentlog.Refused, cut(verr.Code, maxCode), cut(verr.Message, maxReason)
+}
+
+// maxReason and maxCode bound what a handler's error may put in a row. A
+// message that echoes an argument echoes whatever size the caller chose,
+// and the record must stay readable at its end whatever a caller sends.
+const (
+	maxReason = 1 << 10
+	maxCode   = 128
+)
+
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for len(s) > n {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s + "…"
 }
 
 // failedBy is refusedBy's sibling for the other outcome: the call was
@@ -46,7 +65,7 @@ func failedBy(e *agentlog.Entry, verr *view.Error) {
 	if e == nil || verr == nil {
 		return
 	}
-	e.Outcome, e.Code, e.Reason = agentlog.Failed, verr.Code, verr.Message
+	e.Outcome, e.Code, e.Reason = agentlog.Failed, cut(verr.Code, maxCode), cut(verr.Message, maxReason)
 }
 
 // maxClientName bounds what a caller may write into every one of its own
@@ -206,9 +225,9 @@ func cleanValue(v any) any {
 // the session fence forbids asking — so the caller knows to record the
 // gate's own refusal rather than a decision nobody made.
 func askConsent(ctx context.Context, c plugin.Capability, opts Options, values map[string]any,
-	profileName string, verr *view.Error, rec *agentlog.Entry) (allowed, asked bool) {
+	profileName string, verr *view.Error, rec *agentlog.Entry) (allowed bool, decided *view.Error) {
 	if !opts.Consent || verr == nil {
-		return false, false
+		return false, nil
 	}
 	// Only the missing-grant refusal is a question. Everything else the
 	// gate can say — a malformed argument, a path outside the root — is a
@@ -216,7 +235,7 @@ func askConsent(ctx context.Context, c plugin.Capability, opts Options, values m
 	// person to approve a call that is wrong on its own terms would teach
 	// them to approve without reading.
 	if verr.Code != "core.grant.required" {
-		return false, false
+		return false, nil
 	}
 	// The session fence is not negotiable per call: while the
 	// operator works in one environment, agents are in that environment and
@@ -224,7 +243,7 @@ func askConsent(ctx context.Context, c plugin.Capability, opts Options, values m
 	// call by call, while distracted, which is the one posture in which
 	// people say yes to things.
 	if active := opts.active(); active != "" && profileName != active {
-		return false, false
+		return false, nil
 	}
 	parked, err := consent.Ask(consent.Call{
 		Cap:     c.ID,
@@ -247,7 +266,7 @@ func askConsent(ctx context.Context, c plugin.Capability, opts Options, values m
 		fmt.Fprintf(os.Stderr,
 			"rta: %d requests are already waiting, so %s was refused without asking — "+
 				"`rta agent pending` shows the queue\n", consent.MaxParked, c.ID)
-		return false, false
+		return false, nil
 	case errors.Is(err, consent.ErrTooBig):
 		// A call whose arguments do not fit on a screen is not one anybody can
 		// consent to by reading it, so it gets the refusal it would have got
@@ -255,12 +274,12 @@ func askConsent(ctx context.Context, c plugin.Capability, opts Options, values m
 		// what is being approved.
 		fmt.Fprintf(os.Stderr,
 			"rta: %s was refused without asking — %v\n", c.ID, err)
-		return false, false
+		return false, nil
 	case err != nil:
 		// A request that cannot be written is not a denial: fall back to
 		// the refusal that would have happened without consent at all.
 		fmt.Fprintln(os.Stderr, "rta: could not ask for consent:", err)
-		return false, false
+		return false, nil
 	}
 	defer parked.Close()
 	fmt.Fprintf(os.Stderr, "rta: %s is waiting for you — `rta agent allow %s` (or deny), %s\n",
@@ -273,7 +292,10 @@ func askConsent(ctx context.Context, c plugin.Capability, opts Options, values m
 	switch {
 	case answer.Allowed:
 		rec.Auth = agentlog.Live
-		return true, true
+		if answer.By != "" {
+			rec.Reason = "approved by " + answer.By
+		}
+		return true, nil
 	case answer.Answered:
 		// These two answers are the ledger's own events, not any gate's, so
 		// they carry their own codes: before the split they were the only
@@ -282,11 +304,28 @@ func askConsent(ctx context.Context, c plugin.Capability, opts Options, values m
 		// became of it.
 		rec.Outcome, rec.Auth = agentlog.Refused, agentlog.Denied
 		rec.Code, rec.Reason = "core.consent.declined", "the operator declined it"
-		return false, true
+		// The decision, not the question: the agent used to get the
+		// pre-consent refusal back — core.grant.required with the exact
+		// self-grant command as its hint — after the operator had said no,
+		// which invited the retry the no was meant to end.
+		return false, view.Errorf("core.consent.declined", "the operator declined this call").
+			WithHint("do not retry it; the operator has seen it and said no")
+	case ctx.Err() != nil:
+		// The client hung up while its call was parked: the record says
+		// so, distinctly from a request that ran out of time with a client
+		// still waiting, and the answer goes to nobody.
+		rec.Outcome, rec.Auth = agentlog.Refused, agentlog.Blocked
+		rec.Code, rec.Reason = "core.consent.abandoned", "the client stopped waiting for an answer"
+		return false, verr
 	default:
+		// The degradation promise: with consent on and nobody there, the
+		// agent gets exactly the refusal it would have got with consent
+		// off, hint included — an unattended machine must not fail
+		// differently for having been told to ask. Only the record knows
+		// the question was put.
 		rec.Outcome, rec.Auth = agentlog.Refused, agentlog.Blocked
 		rec.Code, rec.Reason = "core.consent.expired", "nobody answered before the request expired"
-		return false, true
+		return false, verr
 	}
 }
 

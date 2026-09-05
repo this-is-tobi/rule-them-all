@@ -107,6 +107,12 @@ func TestADeclinedCallIsRefusedWithTheOperatorsAnswer(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("a declined call went through")
 	}
+	// The agent is told the decision, not the question it was refused
+	// before the question was put — and not handed the self-grant command.
+	text := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(text, "core.consent.declined") || strings.Contains(text, "rta grant allow") {
+		t.Fatalf("a declined call was not reported as declined: %s", text)
+	}
 	entries, _ := agentlog.Read(0)
 	if len(entries) != 1 || entries[0].Auth != agentlog.Denied {
 		t.Fatalf("the ledger does not record the decline: %+v", entries)

@@ -249,6 +249,26 @@ func (m Model) runAction(a capAction, tbl view.Table) (tea.Model, tea.Cmd) {
 			}
 			base[f.Name] = v
 		}
+		// And every other input the row shows a column for: a grant row
+		// carries its record, agent and profile, and `x` on one of two
+		// note.rm rows used to revoke both because only the target seeded.
+		// The boxes still open for anything a person would change; these
+		// fill them with what the row already says.
+		for _, f := range a.cap.Inputs {
+			if _, done := base[f.Name]; done || f.Local || (f.Type != plugin.String && f.Type != plugin.Int) {
+				continue
+			}
+			raw, found := cellNamed(tbl, row, f.Name)
+			if !found {
+				raw, found = cellNamed(tbl, row, columnAlias[f.Name])
+			}
+			if !found || strings.TrimSpace(raw) == "" || strings.TrimSpace(raw) == "—" {
+				continue
+			}
+			if v, err := rowKey(f, raw); err == nil {
+				base[f.Name] = v
+			}
+		}
 	case srcSelf:
 		// The page already knows its subject: reuse the identity it ran with.
 		for _, f := range keys {
@@ -294,7 +314,15 @@ func (m Model) runAction(a capAction, tbl view.Table) (tea.Model, tea.Cmd) {
 // cellNamed returns the row's cell under the column whose header matches an
 // input's name, case-insensitively — the convention that lets a producer
 // mark which column is which identity without a second declaration.
+// columnAlias maps an input to the column that shows it under another
+// word: a grant's scope is its "Record" on screen, because that is what a
+// person reads it as.
+var columnAlias = map[string]string{"scope": "record"}
+
 func cellNamed(tbl view.Table, row []string, name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
 	for i, c := range tbl.Columns {
 		if i < len(row) && strings.EqualFold(c.Name, name) {
 			return row[i], true

@@ -53,7 +53,9 @@ agent log   warn   the record breaks at entry 24 — nothing records where this
 
 `rta doctor` surfaces the same finding without you asking.
 
-**What this does and does not buy you.** It makes tampering *visible*, not impossible. Anything that can write the file can rewrite the whole chain from the break onward. What it prevents is the quiet edit — removing one embarrassing line and leaving the rest intact — which is the realistic threat for a local file, and it is exactly the sort of thing an agent with filesystem access might attempt.
+**What this does and does not buy you.** It makes tampering *visible*, not impossible. The seals are checked against `agent-log.key` beside the record, so anything that can read that file — any process running as you — can rewrite the whole chain and reseal it, and deleting every file leaves nothing to notice with. What it prevents is the quiet edit — removing one embarrassing line and leaving the rest intact — which is the realistic threat for a local file, and it is exactly the sort of thing an agent with filesystem access might attempt. A mark records where the record ends, so a truncation shows; if the mark itself goes, the next call writes a sealed admission into the chain (`end mark was missing before entry N` under `--detail`) rather than healing it in silence. The only defence against deletion is a copy elsewhere: see [Ship the record somewhere durable](../90-recipes/01-readme.md#ship-the-record-somewhere-durable).
+
+The record keeps about 64 MB — eight files of 8 MB — and drops the oldest past that, recording what it dropped as a sealed `retired` note the chain still verifies across. A day with no rows before a certain hour is not a day where nothing happened; it is where retention starts, and the recipe above is how you keep more.
 
 ## History, not policy
 
@@ -73,9 +75,9 @@ With `rta mcp serve --consent`, a call needing a grant nobody issued is parked i
 
 ```bash
 rta agent pending
-rta agent show 3
-rta agent allow 3
-rta agent deny 3
+rta agent show 5473aa62
+rta agent allow 5473aa62
+rta agent deny 5473aa62
 ```
 
 `rta agent show` includes what the call **would do** — rta runs the capability's own `--dry-run` and puts the result on the parked request. That changes the question from *"may this agent call `note.rm`"* to *"may it remove **this note**"*, which is the question you can actually answer.
