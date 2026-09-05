@@ -419,5 +419,9 @@ func Refusal(l *Lock) *view.Error {
 		msg += ": " + l.Note
 	}
 	return view.Errorf("core.lock.frozen", "%s", msg).
-		WithHint("a person lifts it with `rta lock rm " + string(l.Kind) + " " + l.Name + "`")
+		// No unlock command: this sentence is read by the principal that
+		// was locked, and `rta lock` is on the harness deny lists for
+		// exactly the reason a locked agent must not be handed the key.
+		// `rta lock list` names the command for the person.
+		WithHint("your operator locked it; wait for them to lift it")
 }
