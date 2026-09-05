@@ -457,7 +457,7 @@ func TestALostCallIsShownOnTheRowThatFollowsIt(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("%d rows", len(rows))
 	}
-	if why := cell(t, v.(view.Table), 0, "why"); !strings.Contains(why, "2 calls before this one could not be recorded") {
+	if why := cell(t, v.(view.Table), 1, "why"); !strings.Contains(why, "2 calls before this one could not be recorded") {
 		t.Fatalf("the row does not admit the gap: %q", why)
 	}
 	// One is singular, and a row with nothing missing says nothing.
@@ -518,9 +518,12 @@ func TestTheLogShowsCallsAndVerifiesItsOwnChain(t *testing.T) {
 	if len(table.Rows) != 2 {
 		t.Fatalf("%d rows", len(table.Rows))
 	}
-	// Newest first, which is what somebody scanning a log wants.
-	if got := cell(t, table, 0, "capability"); got != "kv.get" {
-		t.Fatalf("rows are not newest-first: %v", table.Rows)
+	// Time order, newest last: a log is read from its end, back.
+	if got := cell(t, table, 1, "capability"); got != "kv.get" {
+		t.Fatalf("rows are not oldest-first: %v", table.Rows)
+	}
+	if !table.Tail {
+		t.Error("the log must say its newest row is last, so a scrolling surface opens there")
 	}
 
 	// --refused filters to what rta would not do.
@@ -563,16 +566,16 @@ func TestTheLogShowsTheCodeAsItsOwnColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	table := v.(view.Table)
-	if got := cell(t, table, 0, "code"); got != "core.grant.required" {
+	if got := cell(t, table, 1, "code"); got != "core.grant.required" {
 		t.Fatalf("code column = %q, want the dotted code alone", got)
 	}
-	if got := cell(t, table, 0, "why"); got != "no active grant" {
+	if got := cell(t, table, 1, "why"); got != "no active grant" {
 		t.Fatalf("why column = %q, want the sentence without the code", got)
 	}
 	// Blank rather than an em dash on the row where nothing went wrong,
 	// matching why: code and why are the two halves of one cause, and a
 	// clean row has neither.
-	if got := cell(t, table, 1, "code"); got != "" {
+	if got := cell(t, table, 0, "code"); got != "" {
 		t.Fatalf("code column on a clean row = %q, want blank", got)
 	}
 
@@ -609,11 +612,11 @@ func TestTheLogShowsWhichCredentialAuthenticatedEachCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	table := v.(view.Table)
-	// Newest first: the credentialed call was appended last.
-	if got := cell(t, table, 0, "credential"); got != "gateway-token" {
+	// Newest last: the credentialed call was appended last.
+	if got := cell(t, table, 1, "credential"); got != "gateway-token" {
 		t.Fatalf("credential column = %q, want the token label", got)
 	}
-	if got := cell(t, table, 1, "credential"); got != "—" {
+	if got := cell(t, table, 0, "credential"); got != "—" {
 		t.Fatalf("credential column for a stdio call = %q, want the placeholder", got)
 	}
 
@@ -887,8 +890,8 @@ func TestTheLogNarrowsToOneSession(t *testing.T) {
 	if got := cell(t, table, 0, "session"); got != "aaaa0001" {
 		t.Errorf("session column = %q", got)
 	}
-	if got := cell(t, table, 0, "capability"); got != "sys.mem" {
-		t.Errorf("newest first: capability = %q", got)
+	if got := cell(t, table, 1, "capability"); got != "sys.mem" {
+		t.Errorf("newest last: capability = %q", got)
 	}
 }
 

@@ -130,6 +130,7 @@ func ViewToProto(v view.View) *rtav1.View {
 			}),
 			Total:    int32(t.Total),
 			Redacted: t.Redacted,
+			Tail:     t.Tail,
 		}
 		if t.Page != nil {
 			tbl.Page = &rtav1.Cursor{Next: t.Page.Next}
@@ -198,6 +199,7 @@ func ViewFromProto(v *rtav1.View) view.View {
 			}),
 			Total:    int(k.Table.GetTotal()),
 			Redacted: k.Table.GetRedacted(),
+			Tail:     k.Table.GetTail(),
 		}
 		if p := k.Table.GetPage(); p != nil {
 			t.Page = &view.Cursor{Next: p.GetNext()}

@@ -41,14 +41,14 @@ func TestTheLogCanBeShippedWithoutDuplicatingWhatWasAlreadyShipped(t *testing.T)
 
 	// Ship everything, then ship again from the cursor: the second run has
 	// nothing to say.
-	high := all[0][0] // newest first
+	high := all[2][0] // newest last
 	again := logRows(t, map[string]any{"after": atoi(t, high)})
 	if len(again) != 0 {
 		t.Errorf("shipping from the cursor re-exported %d rows: %v", len(again), again)
 	}
 
 	// …and a cursor in the middle returns exactly what came after it.
-	mid := logRows(t, map[string]any{"after": atoi(t, all[2][0])})
+	mid := logRows(t, map[string]any{"after": atoi(t, all[0][0])})
 	if len(mid) != 2 {
 		t.Errorf("from the oldest seq: %d rows, want the 2 after it", len(mid))
 	}

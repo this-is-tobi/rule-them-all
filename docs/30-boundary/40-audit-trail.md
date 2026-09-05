@@ -4,7 +4,7 @@ Grants say what may happen next. The record says what already did — one line p
 
 ```bash
 rta agent overview    # the last hour at a glance
-rta agent log         # one line per call
+rta agent log         # one line per call, oldest first — the latest is at the bottom
 rta agent pending     # anything parked, waiting on you
 ```
 

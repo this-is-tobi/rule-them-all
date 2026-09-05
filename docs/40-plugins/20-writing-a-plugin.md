@@ -34,7 +34,7 @@ func greet(_ context.Context, req plugin.Request) (view.View, error) {
 }
 ```
 
-`view.Text`, `view.Table`, `view.KeyValue`, `view.Tree`, `view.Chart` and `view.Sections` are the whole union. A `view.Table` becomes a bordered table in a terminal, a navigable list in the TUI, CSV under `-o csv`, a markdown table under `-o md`, and structured JSON to an AI agent. You write it once.
+`view.Text`, `view.Table`, `view.KeyValue`, `view.Tree`, `view.Chart` and `view.Sections` are the whole union. A `view.Table` becomes a bordered table in a terminal, a navigable list in the TUI, CSV under `-o csv`, a markdown table under `-o md`, and structured JSON to an AI agent. You write it once. A table whose rows are in time order says so with `Tail: true`: the newest row is last, the terminal ends on it, and the TUI opens on it — a log is read from where things are now, back.
 
 The same applies to failure. Return a `view.Error` rather than a bare error where you can:
 

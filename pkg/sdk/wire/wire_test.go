@@ -162,6 +162,7 @@ func everyViewType() map[string]view.View {
 			Total:    99,
 			Page:     &view.Cursor{Next: "cursor-token"},
 			Redacted: []string{"B"},
+			Tail:     true,
 		},
 		"tree": view.Tree{Roots: []view.Node{
 			{Label: "root", Detail: "d", Children: []view.Node{

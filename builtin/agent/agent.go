@@ -481,10 +481,17 @@ func runLog(_ context.Context, req plugin.Request) (view.View, error) {
 	//
 	// --after and --since deliberately do not widen it, and the difference is
 	// worth stating because the first draft widened all three. Those two keep
-	// a *suffix* of a newest-first read: the newest thirty entries that pass
-	// them are the newest thirty that pass them, whether thirty or five
-	// hundred were read to find them. --refused keeps a scattered subset,
-	// which is the only one of the three that can come up short.
+	// a *suffix* of the record: the newest thirty entries that pass them are
+	// the newest thirty that pass them, whether thirty or five hundred were
+	// read to find them. --refused keeps a scattered subset, which is the
+	// only one of the three that can come up short.
+	//
+	// Selected newest-first, shown oldest-first. The selection walks back
+	// from the end because "the last thirty" is what a limit means on a
+	// log; the table is then put back in time order, newest at the bottom,
+	// because that is where a log is read from — the terminal ends on the
+	// latest call and the eye walks up into the past, and the TUI opens on
+	// the last row for the same reason (view.Table.Tail).
 	want := limit
 	if onlyRefused || sess != "" {
 		want = maxRows
@@ -535,6 +542,7 @@ func runLog(_ context.Context, req plugin.Request) (view.View, error) {
 			shown = append(shown, e)
 		}
 	}
+	slices.Reverse(shown)
 	stamp := stampFormat(shown)
 	rows := make([][]string, 0, len(shown))
 	for _, e := range shown {
@@ -592,7 +600,7 @@ func runLog(_ context.Context, req plugin.Request) (view.View, error) {
 	if sessioned {
 		cols = slices.Insert(cols, whoColumns(named, namedCred), view.Column{Name: "session"})
 	}
-	table := view.Table{Columns: cols, Rows: rows, Total: len(entries)}
+	table := view.Table{Columns: cols, Rows: rows, Total: len(entries), Tail: true}
 	if !req.Bool("detail") {
 		return table, nil
 	}

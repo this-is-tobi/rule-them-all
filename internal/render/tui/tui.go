@@ -473,11 +473,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.current = msg.cap
 		m.result = msg
 		m.enterTrail(msg.cap, m.lastValues)
+		tail := false
 		if tbl, ok := msg.view.(view.Table); ok {
 			m.row = min(m.row, max(len(tbl.Rows)-1, 0))
+			// A log opens where things are now — its last row — and is
+			// walked back from there. On a refresh too: the newest row is
+			// the one that changed, so the cursor goes to it rather than
+			// staying on whatever row it was.
+			if tbl.Tail {
+				m.row, tail = max(len(tbl.Rows)-1, 0), true
+			}
 		}
 		m.renderResult()
-		m.viewport.GotoTop()
+		if tail {
+			m.viewport.GotoBottom()
+		} else {
+			m.viewport.GotoTop()
+		}
 		return m, nil
 
 	case tea.KeyPressMsg:

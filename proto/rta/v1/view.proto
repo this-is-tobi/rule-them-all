@@ -109,6 +109,9 @@ message Table {
   Cursor page = 4;
   // Column names whose cells every renderer must mask.
   repeated string redacted = 5;
+  // The rows are in time order and the newest is last, so a surface that
+  // scrolls opens at the end: a log is read from where it is now, back.
+  bool tail = 6;
 }
 
 enum ChartKind {

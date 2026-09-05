@@ -113,6 +113,13 @@ type Table struct {
 	// silently move the protection to the wrong one — and the same spelling
 	// KeyValue already uses, because it is the same idea.
 	Redacted []string `json:"redacted,omitempty"`
+	// Tail says the rows are in time order with the newest last. Every
+	// surface prints them in that order — a log ends where things are now
+	// and is walked backwards — and a surface that scrolls opens on the last
+	// row rather than the first, which for a record is the oldest thing in
+	// it. Declared by the view, not inferred from a timestamp column, so a
+	// table of expiries in ascending order is not mistaken for a log.
+	Tail bool `json:"tail,omitempty"`
 }
 
 // ChartKind selects how series are drawn.
