@@ -2,6 +2,8 @@ package grant
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -227,5 +229,46 @@ func TestThePassphraseFlagIsRefusedOnTheCLI(t *testing.T) {
 	}
 	if grants, _ := core.Load(); len(grants) != 0 {
 		t.Fatal("the refused flag still issued a grant")
+	}
+}
+
+// `guard status` used to say "off" and offer to enable it when the guard's
+// own file was gone and signed grants remained — the one state every
+// issuing and listing path already refuses as orphaned.
+func TestGuardStatusSaysOrphanedWhenTheGuardFileIsGone(t *testing.T) {
+	t.Setenv("RTA_DATA_DIR", t.TempDir())
+	guardOn(t, "correct horse")
+	if _, err := guardCap(t, "grant.allow").Run(context.Background(),
+		reqTUI(map[string]any{"target": "kv.get", "ttl": "15m", "passphrase": "correct horse"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(guard.Path()); err != nil {
+		t.Fatal(err)
+	}
+	v, err := guardCap(t, "grant.guard.status").Run(context.Background(), req(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprint(v)
+	if !strings.Contains(body, "ORPHANED") || strings.Contains(body, "off —") {
+		t.Fatalf("guard status hides the orphaned state: %s", body)
+	}
+}
+
+// A target the team forbids is refused before the passphrase is asked for,
+// not after it was typed.
+func TestTheCeilingIsCheckedBeforeThePassphrase(t *testing.T) {
+	t.Setenv("RTA_DATA_DIR", t.TempDir())
+	withPolicy(t, "never: [kv.get]\n")
+	guardOn(t, "correct horse")
+	// No passphrase supplied: with the ceiling checked first, the refusal
+	// is the policy's; it used to be the missing passphrase.
+	_, err := guardCap(t, "grant.allow").Run(context.Background(),
+		req(map[string]any{"target": "kv.get", "ttl": "15m"}))
+	if err == nil {
+		t.Fatal("a forbidden target was allowed")
+	}
+	if c := code(t, err); c == "core.guard.passphrase.required" {
+		t.Fatalf("the passphrase was asked for before the policy said no: %s", c)
 	}
 }

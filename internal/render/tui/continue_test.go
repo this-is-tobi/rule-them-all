@@ -175,3 +175,38 @@ func TestTheEnvironmentsOwnContributionIsStillADisplay(t *testing.T) {
 		t.Error("an untouched environment value came back as an answer")
 	}
 }
+
+// A row seeds every input it shows a column for, not only the identity: a
+// grant row carries its record, agent and profile, and `x` on one of two
+// note.rm rows used to revoke both because only the target seeded.
+func TestARowSeedsEveryInputItShowsAColumnFor(t *testing.T) {
+	m := storeModel(t)
+	revoke := plugin.Capability{
+		ID: "demo.revoke", Summary: "revoke", Safety: plugin.Destructive,
+		Inputs: []plugin.Field{
+			{Name: "target", Type: plugin.String, Positional: true},
+			{Name: "scope", Type: plugin.String, Positional: true},
+			{Name: "agent", Type: plugin.String},
+			{Name: "profile", Type: plugin.String},
+			{Name: "all", Type: plugin.Bool},
+		},
+		Run: func(context.Context, plugin.Request) (view.View, error) { return view.Text{}, nil },
+	}
+	m.row = 1
+	tbl := view.Table{
+		Columns: []view.Column{{Name: "Target"}, {Name: "Agent"}, {Name: "Record"}, {Name: "Profile"}},
+		Rows:    [][]string{{"note.rm", "claude", "1", "—"}, {"note.rm", "cursor", "2", "—"}},
+	}
+	model, _ := m.runAction(capAction{key: "x", label: "revoke", cap: revoke, src: srcRow}, tbl)
+	next := model.(Model)
+	if next.form == nil {
+		t.Fatal("a destructive row action did not open a form")
+	}
+	got := next.form.values()
+	if got["target"] != "note.rm" || got["scope"] != "2" || got["agent"] != "cursor" {
+		t.Errorf("seeded %v, want the row's target, record (as scope) and agent", got)
+	}
+	if v, ok := got["profile"]; ok && v != "" {
+		t.Errorf("an em dash seeded profile = %v", v)
+	}
+}

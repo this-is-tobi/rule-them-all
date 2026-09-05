@@ -820,11 +820,12 @@ func notPreviewed(r consent.Request) string {
 // answeredBy names the surface that answered, for the decision file and the
 // ledger. It was the literal "cli" once, which the TUI inherited by
 // dispatching this same capability — a label, not a lie, but a wrong one.
+// answeredBy is measured, not asserted: the same origin a grant records,
+// so a one-shot answer typed at a terminal reads as such and one issued by
+// a process with no terminal — an agent with a shell answering its own
+// question — reads as "command", the way a self-issued grant does.
 func answeredBy(req plugin.Request) string {
-	if req.Surface() == plugin.SurfaceTUI {
-		return "tui"
-	}
-	return "cli"
+	return grant.Origin(req.Surface(), term.IsTerminal(int(stdio.Real().Fd())))
 }
 
 func runAllow(_ context.Context, req plugin.Request) (view.View, error) {

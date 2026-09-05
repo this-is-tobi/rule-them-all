@@ -384,6 +384,9 @@ func (p *Parked) Close() {
 // Answer is the outcome of waiting.
 type Answer struct {
 	Allowed bool
+	// By is the measured origin of the decision, carried into the record
+	// so an approval names who gave it rather than only that somebody did.
+	By string
 	// Answered is false when nobody replied before the deadline — which is
 	// not a no from anybody, and the caller reports it as the refusal that
 	// would have happened without consent at all.
@@ -414,7 +417,7 @@ func (p *Parked) Wait(ctx context.Context) Answer {
 		}
 		if !keyMissing {
 			if d, ok := readDecision(key, p.Request.ID); ok && d.Digest == p.Request.Digest {
-				return Answer{Allowed: d.Allow, Answered: true}
+				return Answer{Allowed: d.Allow, Answered: true, By: d.By}
 			}
 		}
 		select {

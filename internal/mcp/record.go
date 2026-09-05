@@ -292,6 +292,9 @@ func askConsent(ctx context.Context, c plugin.Capability, opts Options, values m
 	switch {
 	case answer.Allowed:
 		rec.Auth = agentlog.Live
+		if answer.By != "" {
+			rec.Reason = "approved by " + answer.By
+		}
 		return true, nil
 	case answer.Answered:
 		// These two answers are the ledger's own events, not any gate's, so
