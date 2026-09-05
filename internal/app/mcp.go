@@ -368,6 +368,14 @@ func newMCPServeCommand(reg *registry.Registry, version string) *cobra.Command {
 				Paths:     guard,
 				Remote:    httpAddr != "",
 			}
+			// A machine that requires a repository policy and finds none
+			// refuses grants already (grant.Ceiling fails closed); the read
+			// tier — the whole default surface — served anyway, with one
+			// stderr line nobody reads. The documented behaviour is "a
+			// server that refuses to start", and now it is.
+			if _, verr := grant.Ceiling(); verr != nil {
+				return verr
+			}
 			server := mcp.NewServer(reg, version, opts)
 			// Logs must go to stderr: stdout is the protocol channel over
 			// stdio, and a banner on the wire over HTTP would be a client
