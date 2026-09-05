@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.0](https://github.com/this-is-tobi/rta/compare/v0.10.0...v0.11.0) (2026-09-05)
+
+
+### Features
+
+* **agent:** a connected client is visible before it makes a call ([16a6b34](https://github.com/this-is-tobi/rta/commit/16a6b3455e920e7b3e4ae88d7b99ca0a58c774d3))
+* **pkg:** which managers the machine has is a table that answers in a moment ([5029ea8](https://github.com/this-is-tobi/rta/commit/5029ea8265ef2026e4bc9117cb712868bf7063b5))
+* **tui:** the arrows browse a box's offer before anything is typed ([fde9e1a](https://github.com/this-is-tobi/rta/commit/fde9e1afdfba80f4e6beb43e843aff6fc6cd732c))
+
 ## [0.10.0](https://github.com/this-is-tobi/rta/compare/v0.9.0...v0.10.0) (2026-09-05)
 
 
