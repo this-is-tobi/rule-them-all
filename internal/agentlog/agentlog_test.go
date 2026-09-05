@@ -2,6 +2,7 @@ package agentlog
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,5 +254,53 @@ func TestAMissingLedgerIsNotAnError(t *testing.T) {
 	rep, err := Verify()
 	if err != nil || rep.Entries != 0 || rep.Broken != 0 {
 		t.Fatalf("Verify on a fresh machine: %v %+v", err, rep)
+	}
+}
+
+// One oversized row used to end the record: a refusal that echoed a 3 MB
+// argument wrote a 3 MB line, the tail reader found no line end in its
+// window, and every append after it failed. Every string is bounded now,
+// and a row written before that is read past rather than fatal.
+func TestAnOversizedRowIsBoundedAndAnOldOneIsReadPast(t *testing.T) {
+	isolate(t)
+	huge := strings.Repeat("A", 3<<20)
+	if err := Append(Entry{Cap: "fs.hash", Outcome: Failed, Auth: Open, Reason: huge, Args: map[string]any{"path": huge}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatalf("the append after an oversized one failed: %v", err)
+	}
+	got, err := Read(0)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("read = %d entries, %v", len(got), err)
+	}
+	if len(got[0].Reason) > maxField+4 || got[0].Args["…"] == nil {
+		t.Errorf("row was not bounded: reason %d bytes, args %v", len(got[0].Reason), got[0].Args)
+	}
+	rep, verr := Verify()
+	if verr != nil || rep.Broken != 0 {
+		t.Fatalf("a bounded record must verify: %+v %v", rep, verr)
+	}
+
+	// A record with a raw oversized line from before the bound: the next
+	// append and every reader get past it.
+	isolate(t)
+	if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(Path(), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(f, `{"seq":2,"at":"2026-08-28T00:00:00Z","capability":"fs.hash","outcome":"failed","auth":"open","reason":"%s","prev":"x","seal":"y"}`+"\n", strings.Repeat("B", 200<<10))
+	f.Close()
+	if err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open}); err != nil {
+		t.Fatalf("append after a raw oversized line: %v", err)
+	}
+	if got, err := Read(0); err != nil || len(got) != 3 {
+		t.Fatalf("read past the oversized line = %d, %v", len(got), err)
+	}
+	if _, verr := Verify(); verr != nil {
+		t.Fatalf("verify must read past the oversized line: %v", verr)
 	}
 }

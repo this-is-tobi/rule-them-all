@@ -37,7 +37,26 @@ func refusedBy(e *agentlog.Entry, verr *view.Error) {
 	if e == nil || verr == nil {
 		return
 	}
-	e.Outcome, e.Code, e.Reason = agentlog.Refused, verr.Code, verr.Message
+	e.Outcome, e.Code, e.Reason = agentlog.Refused, cut(verr.Code, maxCode), cut(verr.Message, maxReason)
+}
+
+// maxReason and maxCode bound what a handler's error may put in a row. A
+// message that echoes an argument echoes whatever size the caller chose,
+// and the record must stay readable at its end whatever a caller sends.
+const (
+	maxReason = 1 << 10
+	maxCode   = 128
+)
+
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for len(s) > n {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s + "…"
 }
 
 // failedBy is refusedBy's sibling for the other outcome: the call was
@@ -46,7 +65,7 @@ func failedBy(e *agentlog.Entry, verr *view.Error) {
 	if e == nil || verr == nil {
 		return
 	}
-	e.Outcome, e.Code, e.Reason = agentlog.Failed, verr.Code, verr.Message
+	e.Outcome, e.Code, e.Reason = agentlog.Failed, cut(verr.Code, maxCode), cut(verr.Message, maxReason)
 }
 
 // maxClientName bounds what a caller may write into every one of its own

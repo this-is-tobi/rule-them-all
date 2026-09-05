@@ -91,6 +91,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/this-is-tobi/rta/internal/atomicfile"
 	"github.com/this-is-tobi/rta/internal/filelock"
@@ -106,6 +107,10 @@ const (
 	// maxLine bounds one entry, so a capability with enormous arguments
 	// cannot write a line nothing will read back.
 	maxLine = 16 << 10
+	// maxField bounds one string field of an entry that is already over
+	// maxLine — enough for any message a person reads, and ten of them
+	// still fit the line.
+	maxField = 1 << 10
 	// tailWindow is how much of a file's end is read to find its last
 	// entry. Entries are a few hundred bytes; this is generous.
 	tailWindow = 64 << 10
@@ -715,8 +720,24 @@ func Append(e Entry) (err error) {
 	}
 	if len(body) > maxLine {
 		// Rather than drop the entry: the call happened, and a truncated
-		// record of it beats none. Args are the only unbounded part.
+		// record of it beats none. Args are the unbounded part that is
+		// expected; every string field is bounded after them, because one
+		// was not, once. A refusal that echoed a 3 MB argument in its
+		// message became a 3 MB row, the tail reader could not find a line
+		// end inside its window, and every append on the machine failed
+		// from then on — silently, to a stderr the client swallows. The
+		// row is now bounded whatever a handler puts in it, and lastEntryIn
+		// widens its window besides, so an old oversized row is read past
+		// rather than fatal.
 		e.Args = map[string]any{"…": fmt.Sprintf("%d bytes of arguments, omitted", len(body))}
+		e.Reason = clip(e.Reason, maxField)
+		e.Code = clip(e.Code, maxField)
+		e.Client = clip(e.Client, maxField)
+		e.Credential = clip(e.Credential, maxField)
+		e.Agent = clip(e.Agent, maxField)
+		e.Profile = clip(e.Profile, maxField)
+		e.Tool = clip(e.Tool, maxField)
+		e.Cap = clip(e.Cap, maxField)
 		if body, err = json.Marshal(e); err != nil {
 			return err
 		}
@@ -957,26 +978,31 @@ func lastEntryIn(path string) (Entry, error) {
 	if size == 0 {
 		return Entry{}, nil
 	}
-	start := size - tailWindow
-	if start < 0 {
-		start = 0
-	}
-	buf := make([]byte, size-start)
-	if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
-		return Entry{}, err
-	}
-	lines := bytes.Split(bytes.TrimRight(buf, "\n"), []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
-		var e Entry
-		if json.Unmarshal(lines[i], &e) == nil && e.Seq > 0 {
-			return e, nil
+	// The window grows until a line parses or the whole file has been
+	// read: a row larger than the window — written before rows were
+	// bounded — must be read past, not reported as the end of the record.
+	for chunk := int64(tailWindow); ; chunk *= 4 {
+		start := size - chunk
+		if start < 0 {
+			start = 0
+		}
+		buf := make([]byte, size-start)
+		if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
+			return Entry{}, err
+		}
+		lines := bytes.Split(bytes.TrimRight(buf, "\n"), []byte("\n"))
+		for i := len(lines) - 1; i >= 0; i-- {
+			var e Entry
+			if json.Unmarshal(lines[i], &e) == nil && e.Seq > 0 {
+				return e, nil
+			}
+		}
+		if start == 0 {
+			break
 		}
 	}
-	// A file whose tail holds no parseable entry: appending with a zero
+	// A file that holds no parseable entry at all: appending with a zero
 	// predecessor would silently start a second chain, so say so instead.
-	if start > 0 {
-		return Entry{}, fmt.Errorf("%s has no readable entry in its last %d bytes", path, tailWindow)
-	}
 	return Entry{}, fmt.Errorf("%s holds no readable entry", path)
 }
 
@@ -1082,8 +1108,7 @@ func entriesIn(path string) ([]Entry, error) {
 	}
 	defer f.Close()
 	var out []Entry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), maxLine*2)
+	sc := newLineReader(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
@@ -1244,8 +1269,7 @@ func Verify() (Report, error) {
 		if err != nil {
 			return rep, err
 		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 0, 64<<10), maxLine*2)
+		sc := newLineReader(f)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
 			if line == "" {
@@ -1408,4 +1432,50 @@ func plural(n int64, one, many string) string {
 		return fmt.Sprintf("%d %s", n, one)
 	}
 	return fmt.Sprintf("%d %s", n, many)
+}
+
+// lineReader walks a file line by line with no ceiling on a line's length.
+// bufio.Scanner stops at its buffer with "token too long", and a record
+// holding one oversized row — written before rows were bounded — would
+// then be unreadable from that row on, in every command that reads it.
+type lineReader struct {
+	r    *bufio.Reader
+	line string
+	err  error
+}
+
+func newLineReader(f *os.File) *lineReader { return &lineReader{r: bufio.NewReaderSize(f, 64<<10)} }
+
+func (l *lineReader) Scan() bool {
+	if l.err != nil {
+		return false
+	}
+	line, err := l.r.ReadString('\n')
+	if err != nil {
+		if !errors.Is(err, io.EOF) {
+			l.err = err
+		}
+		if line == "" {
+			return false
+		}
+	}
+	l.line = line
+	return true
+}
+
+func (l *lineReader) Text() string { return l.line }
+func (l *lineReader) Err() error   { return l.err }
+
+// clip cuts s to at most n bytes on a rune boundary, marking the cut: a
+// byte-slice through a multi-byte character would put invalid UTF-8 into a
+// sealed file, where it stays forever.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for len(s) > n {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s + "…"
 }
