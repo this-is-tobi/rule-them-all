@@ -304,3 +304,55 @@ func TestAnOversizedRowIsBoundedAndAnOldOneIsReadPast(t *testing.T) {
 		t.Fatalf("verify must read past the oversized line: %v", verr)
 	}
 }
+
+func TestReadAfterWalksForwardFromTheCursor(t *testing.T) {
+	isolate(t)
+	for i := 0; i < 12; i++ {
+		if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ReadAfter(2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 || got[0].Seq != 3 || got[4].Seq != 7 {
+		t.Fatalf("ReadAfter(2, 5) = %v, want seq 3..7", seqList(got))
+	}
+	if got, _ := ReadAfter(12, 5); len(got) != 0 {
+		t.Errorf("past the end = %v", seqList(got))
+	}
+	if got, _ := ReadAfter(0, 0); len(got) != 12 {
+		t.Errorf("no limit = %d entries", len(got))
+	}
+}
+
+func TestRecentIsBoundedByTimeNotCount(t *testing.T) {
+	isolate(t)
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 3; i++ {
+		if err := Append(Entry{Cap: "sys.cpu", Outcome: Ran, Auth: Open, At: old}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if err := Append(Entry{Cap: "sys.mem", Outcome: Ran, Auth: Open}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := Recent(time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[0].Seq != 4 {
+		t.Fatalf("Recent = %v, want the four recent ones", seqList(got))
+	}
+}
+
+func seqList(es []Entry) []int64 {
+	out := make([]int64, 0, len(es))
+	for _, e := range es {
+		out = append(out, e.Seq)
+	}
+	return out
+}

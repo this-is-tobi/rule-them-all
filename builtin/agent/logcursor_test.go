@@ -131,3 +131,23 @@ func atoi(t *testing.T, s string) int {
 	}
 	return n
 }
+
+// A cursor reads forward. The shipping recipe appends whatever is past the
+// archive's highest seq, and a burst between two runs used to lose its
+// oldest rows: --after selected the newest rows past the cursor.
+func TestAfterReadsForwardNotFromTheNewestEnd(t *testing.T) {
+	isolate(t)
+	for i := 0; i < 12; i++ {
+		if err := agentlog.Append(agentlog.Entry{Cap: "sys.cpu", Outcome: agentlog.Ran, Auth: agentlog.Open}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := logRows(t, map[string]any{"after": 2, "limit": 5})
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r[0]] = true
+	}
+	if len(rows) != 5 || !got["3"] || !got["7"] || got["8"] {
+		t.Fatalf("--after 2 --limit 5 = %v, want seq 3..7", rows)
+	}
+}

@@ -318,10 +318,16 @@ func openSessions() ([]session.Record, map[string]int) {
 		return nil, nil
 	}
 	calls := map[string]int{}
-	if entries, err := agentlog.Read(maxRows); err == nil {
-		for _, e := range entries {
-			if e.Session != "" {
-				calls[e.Session]++
+	if len(open) > 0 {
+		// Since the oldest open server started: every call of every open
+		// session is inside that window, and nothing older matters here.
+		// A second early: the record stamps entries to the second, and a
+		// server's first call can land inside the second it started in.
+		if entries, err := agentlog.Recent(open[0].Since.Add(-time.Second)); err == nil {
+			for _, e := range entries {
+				if e.Session != "" {
+					calls[e.Session]++
+				}
 			}
 		}
 	}
@@ -360,18 +366,17 @@ func plural(n int, one, many string) string {
 }
 
 func runOverview(_ context.Context, req plugin.Request) (view.View, error) {
-	entries, err := agentlog.Read(maxRows)
+	hour := time.Now().Add(-time.Hour)
+	// Bounded by time, not by a display-sized window: a busy hour has more
+	// than five hundred calls, and the tile said 500.
+	entries, err := agentlog.Recent(hour)
 	if err != nil {
 		return nil, view.Errorf("agent.log.unreadable", "%v", err)
 	}
 	waiting, _ := consent.Pending()
 
-	hour := time.Now().Add(-time.Hour)
 	var recent, refused, approved int
 	for _, e := range entries {
-		if e.At.Before(hour) {
-			continue
-		}
 		recent++
 		if e.Outcome == agentlog.Refused {
 			refused++
@@ -402,10 +407,9 @@ func runOverview(_ context.Context, req plugin.Request) (view.View, error) {
 		{Key: "refused", Value: fmt.Sprintf("%d", refused)},
 		{Key: "you approved live", Value: fmt.Sprintf("%d", approved)},
 	}
-	if len(entries) > 0 {
-		last := entries[len(entries)-1]
+	if last, err := agentlog.Read(1); err == nil && len(last) > 0 {
 		pairs = append(pairs, view.Pair{Key: "last call",
-			Value: fmt.Sprintf("%s %s, %s", last.Cap, last.Outcome, format.Ago(last.At))})
+			Value: fmt.Sprintf("%s %s, %s", last[0].Cap, last[0].Outcome, format.Ago(last[0].At))})
 	} else {
 		pairs = append(pairs, view.Pair{Key: "last call", Value: "nothing recorded yet"})
 	}
@@ -489,10 +493,21 @@ func runLog(_ context.Context, req plugin.Request) (view.View, error) {
 	if onlyRefused || sess != "" {
 		want = maxRows
 	}
-	entries, err := agentlog.Read(want)
+	var entries []agentlog.Entry
+	var err error
+	if after > 0 {
+		// A cursor reads forward: the rows just past it, not the newest
+		// rows that happen to be past it. The difference is the whole
+		// shipping recipe — an archive appended from the newest end skips
+		// whatever a burst wrote between two runs.
+		entries, err = agentlog.ReadAfter(after, want)
+	} else {
+		entries, err = agentlog.Read(want)
+	}
 	if err != nil {
 		return nil, view.Errorf("agent.log.unreadable", "%v", err)
 	}
+	filtered := onlyRefused || sess != "" || after > 0 || !since.IsZero()
 	// Both columns appear only once a row can fill them, which for a record
 	// written before agents were named — or before rta could serve over
 	// HTTP at all — is never, and a column of em dashes on the screen an
@@ -592,7 +607,14 @@ func runLog(_ context.Context, req plugin.Request) (view.View, error) {
 	if sessioned {
 		cols = slices.Insert(cols, whoColumns(named, namedCred), view.Column{Name: "session"})
 	}
-	table := view.Table{Columns: cols, Rows: rows, Total: len(entries)}
+	// Total is what the rows were chosen from; under a filter that is the
+	// rows themselves — `0 of 500 rows` under --refused read as five
+	// hundred refusals.
+	total := len(entries)
+	if filtered {
+		total = len(shown)
+	}
+	table := view.Table{Columns: cols, Rows: rows, Total: total}
 	if !req.Bool("detail") {
 		return table, nil
 	}

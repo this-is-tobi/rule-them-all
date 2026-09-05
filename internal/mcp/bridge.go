@@ -81,13 +81,42 @@ func NewServer(reg *registry.Registry, version string, opts Options) *sdk.Server
 		},
 	})
 
+	known := map[string]bool{}
 	for _, c := range reg.Capabilities() {
 		if !opts.exposed(c) || !opts.remoteExposed(c) {
 			continue
 		}
 		server.AddTool(toolDef(c, opts), handler(c, opts, reg))
+		known[toolcall.Name(c.ID)] = true
 	}
+	server.AddReceivingMiddleware(recordUnknownTools(known, opts))
 	return server
+}
+
+// recordUnknownTools writes a row for a tools/call naming a tool the
+// catalogue does not have. The SDK answers those itself, before any handler
+// runs, and so before the record was written: an agent reaching for
+// grant_allow or kv_rm on a server that did not expose them left no trace,
+// and those are exactly the calls an operator grepping outcome=refused is
+// looking for. The name is bounded and cleaned like a client's own name,
+// because it is the caller's to choose.
+func recordUnknownTools(known map[string]bool, opts Options) sdk.Middleware {
+	return func(next sdk.MethodHandler) sdk.MethodHandler {
+		return func(ctx context.Context, method string, req sdk.Request) (sdk.Result, error) {
+			if method == "tools/call" {
+				if r, ok := req.(*sdk.CallToolRequest); ok && r.Params != nil && !known[r.Params.Name] {
+					name := cut(textclean.Terminal(r.Params.Name), maxClientName)
+					rec := agentlog.Entry{
+						Tool: name, Outcome: agentlog.Refused, Auth: agentlog.Blocked,
+						Agent: opts.Agent, Client: clientName(r), Credential: credentialName(ctx),
+						Session: opts.Session, Code: "core.mcp.unknown", Reason: "no such tool on this server",
+					}
+					record(rec)
+				}
+			}
+			return next(ctx, method, req)
+		}
+	}
 }
 
 // reg is passed rather than read off Options because it is what the gate needs
@@ -156,7 +185,10 @@ func call(ctx context.Context, c plugin.Capability, opts Options, reg *registry.
 		values := map[string]any{}
 		if raw := req.Params.Arguments; len(raw) > 0 {
 			if err := json.Unmarshal(raw, &values); err != nil {
-				return errResult(view.Errorf("core.mcp.badargs", "invalid arguments: %v", err)), nil
+				verr := view.Errorf("core.mcp.badargs", "arguments must be a JSON object").
+					WithHint(err.Error())
+				refusedBy(rec, verr)
+				return errResult(verr), nil
 			}
 			// `"arguments": null` is legal JSON and legal MCP — the field is
 			// optional and clients do send it explicitly — and unmarshalling

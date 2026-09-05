@@ -1479,3 +1479,67 @@ func clip(s string, n int) string {
 	}
 	return s + "…"
 }
+
+// ReadAfter is the record from just past seq onwards, oldest first, at most
+// limit entries. It walks the segments forward and skips whole files whose
+// last entry is at or before the cursor, so shipping from a cursor costs
+// what is new and not the whole record.
+//
+// This is the read the shipping recipe needs and Read is not: Read keeps
+// the newest entries, so `--after 0 --limit 500` on a 600-entry record
+// answered 101–600 and the archive never saw the first hundred.
+func ReadAfter(seq int64, limit int) ([]Entry, error) {
+	files, err := Segments()
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	for _, p := range files {
+		last, err := lastEntryIn(p)
+		if err != nil || last.Seq <= seq {
+			continue
+		}
+		es, err := entriesIn(p)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range es {
+			if e.Seq <= seq {
+				continue
+			}
+			out = append(out, e)
+			if limit > 0 && len(out) >= limit {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
+}
+
+// Recent is every entry written at or after since, oldest first, bounded by
+// time rather than by count: a tile that says "calls in the last hour" must
+// not stop counting at the last five hundred rows.
+func Recent(since time.Time) ([]Entry, error) {
+	files, err := Segments()
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	for i := len(files) - 1; i >= 0; i-- {
+		es, err := entriesIn(files[i])
+		if err != nil {
+			return nil, err
+		}
+		var keep []Entry
+		for _, e := range es {
+			if !e.At.Before(since) {
+				keep = append(keep, e)
+			}
+		}
+		out = append(keep, out...)
+		if len(es) > 0 && es[0].At.Before(since) {
+			break
+		}
+	}
+	return out, nil
+}
